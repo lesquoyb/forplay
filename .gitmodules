@@ -1,0 +1,6 @@
+[submodule "fortran-socket"]
+	path = fortran-socket
+	url = .\\deps\\fortran-socket\\
+[submodule "fortran-sdl2"]
+	path = fortran-sdl2
+	url = .\\deps\\fortran-sdl2\\
