@@ -1,0 +1,20 @@
+name = "forplay"
+version = "0.1.0"
+license = "MIT"
+author = "Baptiste Lesquoy"
+description = "Asymmetric multiplayer maze game with SDL2"
+
+[build]
+link = ["mingw32", "SDL2main", "SDL2", "SDL2_ttf", "ws2_32"]
+
+[library]
+source-dir = "src"
+
+[dependencies]
+fortran-sdl2 = { path = "deps/fortran-sdl2" }
+fortran-socket = { path = "deps/fortran-socket" }
+
+[[executable]]
+name = "forplay"
+source-dir = "app"
+main = "main.f90"

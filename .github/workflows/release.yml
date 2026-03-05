@@ -1,0 +1,191 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            exe: forplay.exe
+            archive: forplay-windows-x86_64.zip
+          - os: ubuntu-latest
+            name: linux
+            exe: forplay
+            archive: forplay-linux-x86_64.tar.gz
+          - os: macos-latest
+            name: macos
+            exe: forplay
+            archive: forplay-macos-arm64.tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ================================================================
+      # Install dependencies — Windows (MSYS2)
+      # ================================================================
+      - name: Setup MSYS2
+        if: matrix.name == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc-fortran
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
+
+      # ================================================================
+      # Install dependencies — Linux
+      # ================================================================
+      - name: Install dependencies (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core
+
+      # ================================================================
+      # Install dependencies — macOS
+      # ================================================================
+      - name: Install dependencies (macOS)
+        if: matrix.name == 'macos'
+        run: brew install gcc sdl2 sdl2_ttf
+
+      # ================================================================
+      # Install fpm
+      # ================================================================
+      - name: Install fpm (Windows)
+        if: matrix.name == 'windows'
+        shell: msys2 {0}
+        run: |
+          FPM_VERSION="0.10.0"
+          curl -sSL -o fpm.zip "https://github.com/fortran-lang/fpm/releases/download/v${FPM_VERSION}/fpm-${FPM_VERSION}-windows-x86_64.zip"
+          unzip -o fpm.zip -d fpm-bin
+          mv fpm-bin/fpm.exe /mingw64/bin/fpm.exe
+          fpm --version
+
+      - name: Install fpm (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          FPM_VERSION="0.10.0"
+          curl -sSL -o fpm "https://github.com/fortran-lang/fpm/releases/download/v${FPM_VERSION}/fpm-${FPM_VERSION}-linux-x86_64"
+          chmod +x fpm
+          sudo mv fpm /usr/local/bin/fpm
+          fpm --version
+
+      - name: Install fpm (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          FPM_VERSION="0.10.0"
+          curl -sSL -o fpm "https://github.com/fortran-lang/fpm/releases/download/v${FPM_VERSION}/fpm-${FPM_VERSION}-macos-arm64"
+          chmod +x fpm
+          sudo mv fpm /usr/local/bin/fpm
+          fpm --version
+
+      # ================================================================
+      # Patch fpm.toml for platform-specific link libraries
+      # ================================================================
+      - name: Patch link libraries (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          sed -i 's/^link = .*/link = ["SDL2", "SDL2_ttf"]/' fpm.toml
+          sed -i '/^macros/d' deps/fortran-socket/fpm.toml
+
+      - name: Patch link libraries (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          sed -i '' 's/^link = .*/link = ["SDL2", "SDL2_ttf"]/' fpm.toml
+          sed -i '' '/^macros/d' deps/fortran-socket/fpm.toml
+
+      # ================================================================
+      # Build
+      # ================================================================
+      - name: Build (Windows)
+        if: matrix.name == 'windows'
+        shell: msys2 {0}
+        run: fpm build --profile release
+
+      - name: Build (Linux)
+        if: matrix.name == 'linux'
+        run: fpm build --profile release
+
+      - name: Build (macOS)
+        if: matrix.name == 'macos'
+        run: fpm build --profile release
+        env:
+          FC: gfortran-14
+
+      # ================================================================
+      # Package
+      # ================================================================
+      - name: Package (Windows)
+        if: matrix.name == 'windows'
+        shell: msys2 {0}
+        run: |
+          mkdir -p dist
+          # Find and copy the built executable
+          find build -name "forplay.exe" -type f -exec cp {} dist/ \;
+          # Bundle required DLLs from MSYS2
+          for dll in SDL2.dll SDL2_ttf.dll \
+            libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll \
+            libgfortran-5.dll libquadmath-0.dll \
+            libfreetype-6.dll zlib1.dll libharfbuzz-0.dll \
+            libglib-2.0-0.dll libintl-8.dll libbz2-1.dll \
+            libbrotlidec.dll libbrotlicommon.dll libgraphite2.dll \
+            libpng16-16.dll libiconv-2.dll libpcre2-8-0.dll; do
+            [ -f "/mingw64/bin/$dll" ] && cp "/mingw64/bin/$dll" dist/
+          done
+          cd dist && 7z a "../${{ matrix.archive }}" . && cd ..
+
+      - name: Package (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          mkdir -p dist
+          find build -name "forplay" -type f -executable -exec cp {} dist/ \;
+          cd dist && tar czf "../${{ matrix.archive }}" . && cd ..
+
+      - name: Package (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          mkdir -p dist
+          find build -name "forplay" -type f -perm +111 -exec cp {} dist/ \;
+          cd dist && tar czf "../${{ matrix.archive }}" . && cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+
+  # ==================================================================
+  # Create GitHub Release
+  # ==================================================================
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            windows/forplay-windows-x86_64.zip
+            linux/forplay-linux-x86_64.tar.gz
+            macos/forplay-macos-arm64.tar.gz
