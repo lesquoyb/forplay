@@ -179,16 +179,7 @@ jobs:
           mkdir -p dist/resources
           cp resources/DejaVuSansMono.ttf dist/resources/
           cp resources/icon.png dist/forplay.png
-          # Create .desktop file
-          cat > dist/forplay.desktop << 'EOF'
-[Desktop Entry]
-Name=ForPlay
-Comment=Asymmetric multiplayer maze game
-Exec=forplay
-Icon=forplay
-Type=Application
-Categories=Game;
-EOF
+          cp resources/forplay.desktop dist/
           cd dist && tar czf "../${{ matrix.archive }}" . && cd ..
 
       - name: Package (macOS)
@@ -201,28 +192,7 @@ EOF
           cp resources/forplay.icns $APP/Resources/
           mkdir -p $APP/Resources/resources
           cp resources/DejaVuSansMono.ttf $APP/Resources/resources/
-          cat > $APP/Info.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleExecutable</key>
-  <string>forplay</string>
-  <key>CFBundleIconFile</key>
-  <string>forplay</string>
-  <key>CFBundleIdentifier</key>
-  <string>com.forplay.game</string>
-  <key>CFBundleName</key>
-  <string>ForPlay</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleVersion</key>
-  <string>1.0</string>
-  <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
-</dict>
-</plist>
-EOF
+          cp resources/Info.plist $APP/
           cd dist && tar czf "../${{ matrix.archive }}" . && cd ..
 
       - name: Upload artifact

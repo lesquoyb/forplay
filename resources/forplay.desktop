@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=ForPlay
+Comment=Asymmetric multiplayer maze game
+Exec=forplay
+Icon=forplay
+Type=Application
+Categories=Game;
