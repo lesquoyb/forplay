@@ -60,6 +60,7 @@ program forplay
     integer(c_int) :: client_fd  = -1
     integer(c_int) :: my_socket  = -1
     character(len=256) :: local_ip
+    character(len=256) :: public_ip
     character(len=256) :: client_ip
     character(len=256) :: error_message
     logical :: client_connected
@@ -145,6 +146,7 @@ program forplay
     input_port        = '12345'
     active_field      = 0
     local_ip          = ' '
+    public_ip         = ' '
     client_ip         = ' '
     am_host           = .false.
     game_fd           = -1
@@ -548,6 +550,7 @@ contains
         call net_start_server(pv, server_fd, err)
         if (server_fd < 0) then; error_message = err; return; end if
         call net_get_local_ip(local_ip)
+        call net_get_public_ip(public_ip)
         client_connected  = .false.
         waiting_for_client = .true.
         client_ip         = ' '
@@ -960,28 +963,30 @@ contains
         character(len=256) :: info
         integer :: py
         call draw_text_centered('Hebergement', big_font, COL_CYAN, SCREEN_W/2, 30)
-        write(info,'(A,A)') 'Machine: ', trim(local_ip)
+        write(info,'(A,A)') 'IP locale: ', trim(local_ip)
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 80)
-        write(info,'(A,I0)') 'Port: ', DEFAULT_PORT
+        write(info,'(A,A)') 'IP publique: ', trim(public_ip)
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 110)
+        write(info,'(A,I0)') 'Port: ', DEFAULT_PORT
+        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 140)
 
         if (client_connected) then
             write(info,'(A,A)') 'Client: ', trim(client_ip)
-            call draw_text_centered(trim(info), sml_font, COL_GREEN, SCREEN_W/2, 150)
+            call draw_text_centered(trim(info), sml_font, COL_GREEN, SCREEN_W/2, 180)
         else
             call draw_text_centered('En attente d''un joueur...', sml_font, &
-                                    COL_YELLOW, SCREEN_W/2, 150)
+                                    COL_YELLOW, SCREEN_W/2, 180)
         end if
 
         ! --- Game parameters ---
-        call draw_text_centered('Parametres', sml_font, COL_GRAY, SCREEN_W/2, 195)
+        call draw_text_centered('Parametres', sml_font, COL_GRAY, SCREEN_W/2, 220)
 
         ! Separator line
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(80), uint8(80), uint8(100), uint8(255))
-        rc = sdl_render_draw_line(main_renderer, 180, 218, 620, 218)
+        rc = sdl_render_draw_line(main_renderer, 180, 243, 620, 243)
 
-        py = 240
+        py = 260
         call draw_param_row(py, 'Largeur labyrinthe', cfg_maze_w);  py = py + 30
         call draw_param_row(py, 'Hauteur labyrinthe', cfg_maze_h);  py = py + 30
         call draw_param_row(py, 'Nombre d''objets',   cfg_num_items); py = py + 30

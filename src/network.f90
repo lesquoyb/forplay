@@ -13,7 +13,7 @@ module network
     public :: net_init, net_cleanup
     public :: net_start_server, net_close
     public :: net_connect_to_server
-    public :: net_get_local_ip
+    public :: net_get_local_ip, net_get_public_ip
     public :: net_try_accept_nonblocking
     public :: net_send_bytes, net_recv_all, net_try_recv_bytes
 
@@ -204,14 +204,84 @@ contains
     ! ==================================================================
     subroutine net_get_local_ip(ip_str)
         character(len=*), intent(out) :: ip_str
-        character(len=256) :: hostname
-        integer(c_int) :: status
+        type(sockaddr_in), target :: addr, local_addr
+        integer(c_int) :: udp_fd, res
+        integer(c_int), target :: addrlen
+        type(in_addr) :: ia
+        type(c_ptr) :: cstr_ptr
+        character(len=1), pointer :: cstr(:)
+        integer :: i
 
         ip_str = '127.0.0.1'
-        hostname = ' '
-        status = gethostname(hostname, 256_c_int)
-        if (status == 0) then
-            ip_str = trim(hostname)
+
+        ! Create a UDP socket
+        udp_fd = socket(AF_INET, SOCK_DGRAM, 0_c_int)
+        if (udp_fd < 0) return
+
+        ! Connect to 8.8.8.8:53 (Google DNS) — no actual traffic is sent
+        addr%sin_family = int(AF_INET, c_int16_t)
+        addr%sin_port   = htons(53_c_int16_t)
+        addr%sin_addr   = inet_addr('8.8.8.8' // c_null_char)
+        addr%sin_zero   = transfer(0_c_int64_t, addr%sin_zero)
+
+        res = connect(udp_fd, c_loc(addr), int(c_sizeof(addr), c_int))
+        if (res < 0) then
+            if (is_windows) then
+                res = closesocket(udp_fd)
+            else
+                res = close(udp_fd)
+            end if
+            return
+        end if
+
+        ! Get local address assigned by the OS
+        addrlen = int(c_sizeof(local_addr), c_int)
+        res = getsockname(udp_fd, c_loc(local_addr), c_loc(addrlen))
+        if (res == 0) then
+            ia%s_addr = local_addr%sin_addr
+            cstr_ptr = inet_ntoa(ia)
+            if (c_associated(cstr_ptr)) then
+                call c_f_pointer(cstr_ptr, cstr, [256])
+                ip_str = ' '
+                do i = 1, 256
+                    if (cstr(i) == c_null_char) exit
+                    ip_str(i:i) = cstr(i)
+                end do
+            end if
+        end if
+
+        if (is_windows) then
+            res = closesocket(udp_fd)
+        else
+            res = close(udp_fd)
+        end if
+    end subroutine
+
+    subroutine net_get_public_ip(ip_str)
+        character(len=*), intent(out) :: ip_str
+        character(len=512) :: tmp_file, line
+        integer :: iu, ios
+        logical :: exists
+
+        ip_str = '?'
+        tmp_file = 'forplay_pubip.tmp'
+
+        ! Use curl to query public IP
+        call execute_command_line( &
+            'curl -s -m 3 https://api.ipify.org > ' // trim(tmp_file) // ' 2>&1', &
+            wait=.true., exitstat=ios)
+        if (ios /= 0) return
+
+        inquire(file=trim(tmp_file), exist=exists)
+        if (.not. exists) return
+
+        open(newunit=iu, file=trim(tmp_file), status='old', iostat=ios)
+        if (ios /= 0) return
+        read(iu, '(A)', iostat=ios) line
+        close(iu, status='delete')
+
+        if (ios == 0 .and. len_trim(line) > 0 .and. len_trim(line) <= 45) then
+            ip_str = trim(line)
         end if
     end subroutine
 
