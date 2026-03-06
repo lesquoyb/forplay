@@ -1,4 +1,5 @@
 # ForPlay
+<img width="1024" height="1536" alt="labyrinth of shadows" src="https://github.com/user-attachments/assets/f8551269-0659-4362-9476-de1f66d180f2" />
 
 Asymmetric multiplayer maze game over the network, written in Fortran with SDL2.
 ## The story
