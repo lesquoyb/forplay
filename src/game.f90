@@ -350,8 +350,8 @@ contains
         select case (itype)
             case (ITEM_DASH);       name = 'Dash'
             case (ITEM_VISION);     name = 'Vision'
-            case (ITEM_ILLUMINATE); name = 'Lumiere'
-            case (ITEM_SPEED);      name = 'Vitesse'
+            case (ITEM_ILLUMINATE); name = 'Light'
+            case (ITEM_SPEED);      name = 'Speed'
             case default;           name = '???'
         end select
     end function
@@ -364,13 +364,13 @@ contains
         character(len=64) :: desc
         select case (itype)
             case (ITEM_DASH)
-                desc = 'Fonce en ligne droite, revele le chemin'
+                desc = 'Dash forward in a straight line, reveals path'
             case (ITEM_VISION)
-                desc = 'Rayon de vision +1 a +3 (aleatoire, permanent)'
+                desc = 'Vision radius +1 to +3 (random, permanent)'
             case (ITEM_ILLUMINATE)
-                desc = 'Revele la carte entiere pour ce tour'
+                desc = 'Reveals the entire map for this turn'
             case (ITEM_SPEED)
-                desc = '+1 action par tour (permanent)'
+                desc = '+1 action per turn (permanent)'
             case default
                 desc = ' '
         end select

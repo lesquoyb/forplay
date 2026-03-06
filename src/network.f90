@@ -108,7 +108,6 @@ contains
         integer(c_int) :: res
         type(sockaddr_in), target :: peer_addr
         integer(c_int), target :: peer_addrlen
-        type(in_addr) :: peer_in
         type(c_ptr) :: ip_ptr
         character(kind=c_char), pointer :: ip_chars(:)
         integer :: i
@@ -143,8 +142,7 @@ contains
             peer_addrlen = int(c_sizeof(peer_addr), c_int)
             res = getpeername(cli_fd, c_loc(peer_addr), c_loc(peer_addrlen))
             if (res == 0) then
-                peer_in%s_addr = peer_addr%sin_addr
-                ip_ptr = inet_ntoa(peer_in)
+                ip_ptr = inet_ntoa(peer_addr%sin_addr)
                 if (c_associated(ip_ptr)) then
                     call c_f_pointer(ip_ptr, ip_chars, [16])
                     do i = 1, 16
@@ -207,7 +205,6 @@ contains
         type(sockaddr_in), target :: addr, local_addr
         integer(c_int) :: udp_fd, res
         integer(c_int), target :: addrlen
-        type(in_addr) :: ia
         type(c_ptr) :: cstr_ptr
         character(len=1), pointer :: cstr(:)
         integer :: i
@@ -238,8 +235,7 @@ contains
         addrlen = int(c_sizeof(local_addr), c_int)
         res = getsockname(udp_fd, c_loc(local_addr), c_loc(addrlen))
         if (res == 0) then
-            ia%s_addr = local_addr%sin_addr
-            cstr_ptr = inet_ntoa(ia)
+            cstr_ptr = inet_ntoa(local_addr%sin_addr)
             if (c_associated(cstr_ptr)) then
                 call c_f_pointer(cstr_ptr, cstr, [256])
                 ip_str = ' '

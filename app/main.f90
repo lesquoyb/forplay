@@ -3,7 +3,7 @@
 ! ForPlay - Asymmetric multiplayer maze game
 !
 ! Pages:
-!   PAGE_MENU  - Choose "Heberger" (host) or "Rejoindre" (join)
+!   PAGE_MENU  - Choose "Host" (host) or "Join" (join)
 !   PAGE_HOST  - Shows IP/port, waits for client, launches game
 !   PAGE_JOIN  - Enter IP/port, connect
 !   PAGE_GAME  - The actual game
@@ -315,13 +315,13 @@ contains
 
         ! Buttons Y: below 5 left-column rows
         py = 258 + 5*26
-        ! "Lancer la partie" button
+        ! "Start game" button
         if (client_connected) then
             if (mx>=250 .and. mx<=550 .and. my>=py+10 .and. my<=py+60) then
                 call launch_game_as_host()
             end if
         end if
-        ! "Retour" button
+        ! "Back" button
         if (mx>=300 .and. mx<=500 .and. my>=py+70 .and. my<=py+110) call go_back_to_menu()
 
         total_items = sum(cfg_item_counts)
@@ -356,24 +356,24 @@ contains
         end if
 
         ! --- Right column (x_base=410): minus at 630, plus at 705 ---
-        ! R-Row 1: Nb Lumiere (y=258)
+        ! R-Row 1: Nb Light (y=258)
         if (my >= 245 .and. my <= 271) then
             if (mx >= 630 .and. mx <= 658) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
             if (mx >= 705 .and. mx <= 733 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_ILLUMINATE) = cfg_item_counts(ITEM_ILLUMINATE) + 1
         end if
-        ! R-Row 2: Nb Vitesse (y=284)
+        ! R-Row 2: Nb Speed (y=284)
         if (my >= 271 .and. my <= 297) then
             if (mx >= 630 .and. mx <= 658) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
             if (mx >= 705 .and. mx <= 733 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_SPEED) = cfg_item_counts(ITEM_SPEED) + 1
         end if
-        ! R-Row 3: Vit. cacheur (y=310)
+        ! R-Row 3: Hider spd. (y=310)
         if (my >= 297 .and. my <= 323) then
             if (mx >= 630 .and. mx <= 658) cfg_speed_h = max(1, cfg_speed_h - 1)
             if (mx >= 705 .and. mx <= 733) cfg_speed_h = min(5, cfg_speed_h + 1)
         end if
-        ! R-Row 4: Vit. chercheur (y=336)
+        ! R-Row 4: Seeker spd. (y=336)
         if (my >= 323 .and. my <= 349) then
             if (mx >= 630 .and. mx <= 658) cfg_speed_s = max(1, cfg_speed_s - 1)
             if (mx >= 705 .and. mx <= 733) cfg_speed_s = min(5, cfg_speed_s + 1)
@@ -428,7 +428,7 @@ contains
 
         ! --- Quit confirmation modal ---
         if (show_quit_modal) then
-            if (sym == SDLK_o .or. sym == SDLK_RETURN) then
+            if (sym == SDLK_y .or. sym == SDLK_RETURN) then
                 ! Confirmed quit
                 show_quit_modal = .false.
                 call end_game_with_quit()
@@ -629,7 +629,7 @@ contains
         character(len=256) :: err
         integer :: pi
         if (len_trim(input_ip)==0 .or. len_trim(input_port)==0) then
-            error_message = 'Veuillez remplir tous les champs'; return
+            error_message = 'Please fill in all fields'; return
         end if
         read(input_port, *, err=99) pi
         pv = int(pi, c_int16_t)
@@ -649,7 +649,7 @@ contains
         print *, '[CLIENT] connected, game_fd=', game_fd, ' waiting for init'
         call c_sdl_stop_text_input()
         return
-    99  error_message = 'Erreur: port invalide'
+    99  error_message = 'Error: invalid port'
     end subroutine
 
     subroutine check_for_client()
@@ -671,14 +671,14 @@ contains
         if (.not. game_ended) return
         hud_y = GAME_AREA_H
 
-        ! "Retour au menu" button in HUD: (15, hud_y+45, 170, 35)
+        ! "Back to menu" button in HUD: (15, hud_y+45, 170, 35)
         if (mx >= 15 .and. mx <= 185 .and. &
             my >= hud_y+45 .and. my <= hud_y+80) then
             call go_back_to_menu()
             return
         end if
 
-        ! "Nouvelle partie" button in HUD: (200, hud_y+45, 190, 35) — host only
+        ! "New game" button in HUD: (200, hud_y+45, 190, 35) — host only
         if (am_host) then
             if (mx >= 200 .and. mx <= 390 .and. &
                 my >= hud_y+45 .and. my <= hud_y+80) then
@@ -702,7 +702,7 @@ contains
         gs%s_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
         gs%game_over = .true.
         game_ended   = .true.
-        endgame_msg  = 'Partie abandonnee'
+        endgame_msg  = 'Game abandoned'
     end subroutine
 
     ! =====================================================================
@@ -716,9 +716,9 @@ contains
         gs%s_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
         game_ended = .true.
         if (gs%seeker_won) then
-            endgame_msg = 'Le chercheur a gagne!'
+            endgame_msg = 'The seeker wins!'
         else
-            endgame_msg = 'Le cacheur a gagne!'
+            endgame_msg = 'The hider wins!'
         end if
     end subroutine
 
@@ -965,7 +965,7 @@ contains
             gs%s_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
             gs%game_over = .true.
             game_ended   = .true.
-            endgame_msg  = 'L''adversaire a abandonne'
+            endgame_msg  = 'Opponent has quit'
             return
         else
             ! Item use: atype = slot, param = direction
@@ -1001,10 +1001,10 @@ contains
     ! --- Menu ---
     subroutine render_menu()
         call draw_text_centered('ForPlay', big_font, COL_CYAN, SCREEN_W/2, 100)
-        call draw_text_centered('Choisissez une option', sml_font, COL_GRAY, &
+        call draw_text_centered('Choose an option', sml_font, COL_GRAY, &
                                 SCREEN_W/2, 170)
-        call draw_button(250, 250, 300, 60, 'Heberger une partie', COL_GREEN)
-        call draw_button(250, 350, 300, 60, 'Rejoindre une partie', COL_CYAN)
+        call draw_button(250, 250, 300, 60, 'Host a game', COL_GREEN)
+        call draw_button(250, 350, 300, 60, 'Join a game', COL_CYAN)
         if (len_trim(error_message)>0) &
             call draw_text_centered(trim(error_message), sml_font, COL_RED, &
                                     SCREEN_W/2, 470)
@@ -1014,10 +1014,10 @@ contains
     subroutine render_host()
         character(len=256) :: info
         integer :: py
-        call draw_text_centered('Hebergement', big_font, COL_CYAN, SCREEN_W/2, 30)
-        write(info,'(A,A)') 'IP locale: ', trim(local_ip)
+        call draw_text_centered('Hosting', big_font, COL_CYAN, SCREEN_W/2, 30)
+        write(info,'(A,A)') 'Local IP: ', trim(local_ip)
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 80)
-        write(info,'(A,A)') 'IP publique: ', trim(public_ip)
+        write(info,'(A,A)') 'Public IP: ', trim(public_ip)
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 110)
         write(info,'(A,I0)') 'Port: ', DEFAULT_PORT
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 140)
@@ -1026,12 +1026,12 @@ contains
             write(info,'(A,A)') 'Client: ', trim(client_ip)
             call draw_text_centered(trim(info), sml_font, COL_GREEN, SCREEN_W/2, 180)
         else
-            call draw_text_centered('En attente d''un joueur...', sml_font, &
+            call draw_text_centered('Waiting for a player...', sml_font, &
                                     COL_YELLOW, SCREEN_W/2, 180)
         end if
 
         ! --- Game parameters (two columns) ---
-        call draw_text_centered('Parametres', sml_font, COL_GRAY, SCREEN_W/2, 220)
+        call draw_text_centered('Parameters', sml_font, COL_GRAY, SCREEN_W/2, 220)
 
         ! Separator line
         rc = sdl_set_render_draw_color(main_renderer, &
@@ -1040,18 +1040,18 @@ contains
 
         ! Left column (x_base=20): Maze + Items
         py = 258
-        call draw_param_row_at(20,  py, 'Largeur',    cfg_maze_w);                    py = py + 26
-        call draw_param_row_at(20,  py, 'Hauteur',    cfg_maze_h);                    py = py + 26
-        call draw_param_row_at(20,  py, 'Dist. min',  cfg_min_dist);                  py = py + 26
+        call draw_param_row_at(20,  py, 'Width',      cfg_maze_w);                    py = py + 26
+        call draw_param_row_at(20,  py, 'Height',     cfg_maze_h);                    py = py + 26
+        call draw_param_row_at(20,  py, 'Min dist.',  cfg_min_dist);                  py = py + 26
         call draw_param_row_at(20,  py, 'Nb Dash',    cfg_item_counts(ITEM_DASH));    py = py + 26
         call draw_param_row_at(20,  py, 'Nb Vision',  cfg_item_counts(ITEM_VISION));  py = py + 26
 
         ! Right column (x_base=410): Items (cont.) + Speed
         py = 258
-        call draw_param_row_at(410, py, 'Nb Lumiere', cfg_item_counts(ITEM_ILLUMINATE)); py = py + 26
-        call draw_param_row_at(410, py, 'Nb Vitesse', cfg_item_counts(ITEM_SPEED));      py = py + 26
-        call draw_param_row_at(410, py, 'Vit. cacheur',   cfg_speed_h);                  py = py + 26
-        call draw_param_row_at(410, py, 'Vit. chercheur', cfg_speed_s);                  py = py + 26
+        call draw_param_row_at(410, py, 'Nb Light',  cfg_item_counts(ITEM_ILLUMINATE)); py = py + 26
+        call draw_param_row_at(410, py, 'Nb Speed',  cfg_item_counts(ITEM_SPEED));      py = py + 26
+        call draw_param_row_at(410, py, 'Hider spd.',    cfg_speed_h);                  py = py + 26
+        call draw_param_row_at(410, py, 'Seeker spd.',   cfg_speed_s);                  py = py + 26
 
         ! py for buttons = below 5 left rows
         py = 258 + 5*26
@@ -1061,9 +1061,9 @@ contains
 
         ! Buttons
         if (client_connected) then
-            call draw_button(250, py + 10, 300, 50, 'Lancer la partie', COL_GREEN)
+            call draw_button(250, py + 10, 300, 50, 'Start game', COL_GREEN)
         end if
-        call draw_button(300, py + 70, 200, 40, 'Retour', COL_RED)
+        call draw_button(300, py + 70, 200, 40, 'Back', COL_RED)
     end subroutine
 
     subroutine draw_param_row_at(x_base, y, label, val)
@@ -1127,20 +1127,20 @@ contains
         ! Left column labels: x 20..230
         if (mx >= 20 .and. mx <= 340) then
             select case (row)
-                case (0);  tip = 'Nombre de colonnes (impair recommande)'
-                case (1);  tip = 'Nombre de lignes (impair recommande)'
-                case (2);  tip = 'Distance min en cases entre departs'
-                case (3);  tip = 'Fonce en ligne droite, revele le chemin'
-                case (4);  tip = 'Rayon de vision +1 a +3 (aleatoire, permanent)'
+                case (0);  tip = 'Number of columns (odd recommended)'
+                case (1);  tip = 'Number of rows (odd recommended)'
+                case (2);  tip = 'Min distance in cells between spawns'
+                case (3);  tip = 'Dash forward in a straight line, reveals path'
+                case (4);  tip = 'Vision radius +1 to +3 (random, permanent)'
             end select
         end if
         ! Right column labels: x 410..620
         if (mx >= 410 .and. mx <= 730) then
             select case (row)
-                case (0);  tip = 'Revele la carte entiere pour ce tour'
-                case (1);  tip = '+1 action par tour (permanent)'
-                case (2);  tip = 'Actions par tour du cacheur'
-                case (3);  tip = 'Actions par tour du chercheur'
+                case (0);  tip = 'Reveals the entire map for this turn'
+                case (1);  tip = '+1 action per turn (permanent)'
+                case (2);  tip = 'Actions per turn for the hider'
+                case (3);  tip = 'Actions per turn for the seeker'
             end select
         end if
         if (len_trim(tip) == 0) return
@@ -1173,23 +1173,23 @@ contains
     ! --- Join ---
     subroutine render_join()
         character(len=80) :: dt
-        call draw_text_centered('Rejoindre une partie', big_font, COL_CYAN, &
+        call draw_text_centered('Join a game', big_font, COL_CYAN, &
                                 SCREEN_W/2, 60)
-        call draw_text_at(sml_font, 'Adresse IP:', COL_WHITE, 250, 195)
+        call draw_text_at(sml_font, 'IP Address:', COL_WHITE, 250, 195)
         dt = ' '; if (len_trim(input_ip)>0) dt = trim(input_ip)
         call draw_input_field(250, 220, 350, 40, trim(dt), active_field==0)
         call draw_text_at(sml_font, 'Port:', COL_WHITE, 250, 285)
         dt = ' '; if (len_trim(input_port)>0) dt = trim(input_port)
         call draw_input_field(250, 310, 350, 40, trim(dt), active_field==1)
         if (connecting) then
-            call draw_button(250, 400, 300, 50, 'Connexion...', COL_GRAY)
+            call draw_button(250, 400, 300, 50, 'Connecting...', COL_GRAY)
         else
-            call draw_button(250, 400, 300, 50, 'Se connecter', COL_GREEN)
+            call draw_button(250, 400, 300, 50, 'Connect', COL_GREEN)
         end if
         if (len_trim(error_message)>0) &
             call draw_text_centered(trim(error_message), sml_font, COL_RED, &
                                     SCREEN_W/2, 470)
-        call draw_button(300, 500, 200, 50, 'Retour', COL_RED)
+        call draw_button(300, 500, 200, 50, 'Back', COL_RED)
     end subroutine
 
     ! =====================================================================
@@ -1199,7 +1199,7 @@ contains
         character(len=128) :: msg_text
 
         if (.not. game_ready) then
-            call draw_text_centered('En attente du lancement...', big_font, &
+            call draw_text_centered('Waiting for game to start...', big_font, &
                                     COL_YELLOW, SCREEN_W/2, SCREEN_H/2 - 20)
             return
         end if
@@ -1212,6 +1212,9 @@ contains
 
         ! Draw HUD
         call render_hud()
+
+        ! Item tooltip (HUD inventory + maze floor items)
+        call render_game_tooltip()
 
         ! Draw turn / status overlay
         call render_status()
@@ -1506,9 +1509,9 @@ contains
 
         ! Show role
         if (am_host) then
-            call draw_text_at(sml_font, 'Role: Cacheur', COL_RED, 15, hud_y + 5)
+            call draw_text_at(sml_font, 'Role: Hider', COL_RED, 15, hud_y + 5)
         else
-            call draw_text_at(sml_font, 'Role: Chercheur', COL_CYAN, 15, hud_y + 5)
+            call draw_text_at(sml_font, 'Role: Seeker', COL_CYAN, 15, hud_y + 5)
         end if
 
         ! Show inventory
@@ -1518,7 +1521,7 @@ contains
             ni = gs%seeker%num_items
         end if
 
-        call draw_text_at(sml_font, 'Objets:', COL_GRAY, 15, hud_y + 30)
+        call draw_text_at(sml_font, 'Items:', COL_GRAY, 15, hud_y + 30)
         bx = 110
         do i = 1, MAX_INVENTORY
             ! Draw slot
@@ -1558,18 +1561,18 @@ contains
         ! --- End-game HUD: buttons replace normal right-side info ---
         if (game_ended) then
             ! Show turn count
-            write(label, '(A,I0)') 'Tour: ', gs%turn_number
+            write(label, '(A,I0)') 'Turn: ', gs%turn_number
             call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
 
             ! Buttons inside HUD
-            call draw_button(15, hud_y + 45, 170, 35, 'Retour au menu', COL_RED)
+            call draw_button(15, hud_y + 45, 170, 35, 'Back to menu', COL_RED)
             if (am_host) then
-                call draw_button(200, hud_y + 45, 190, 35, 'Nouvelle partie', COL_GREEN)
+                call draw_button(200, hud_y + 45, 190, 35, 'New game', COL_GREEN)
             else
-                call draw_text_at(sml_font, 'En attente de l''hote...', &
+                call draw_text_at(sml_font, 'Waiting for host...', &
                                   COL_DIM, 200, hud_y + 52)
             end if
-            call draw_text_at(sml_font, 'Echap = Menu', COL_DIM, 470, hud_y + 52)
+            call draw_text_at(sml_font, 'Esc = Menu', COL_DIM, 470, hud_y + 52)
             return
         end if
 
@@ -1579,28 +1582,28 @@ contains
             write(label, '(A,I0)') 'Vision: ', gs%hider%vision_radius
             call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
             if (gs%hider%speed > 1) then
-                write(label, '(A,I0)') 'Vitesse: ', gs%hider%speed
+                write(label, '(A,I0)') 'Speed: ', gs%hider%speed
                 call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 5)
             end if
         else
             write(label, '(A,I0)') 'Vision: ', gs%seeker%vision_radius
             call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
             if (gs%seeker%speed > 1) then
-                write(label, '(A,I0)') 'Vitesse: ', gs%seeker%speed
+                write(label, '(A,I0)') 'Speed: ', gs%seeker%speed
                 call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 5)
             end if
         end if
 
         ! Turn number
-        write(label, '(A,I0)') 'Tour: ', gs%turn_number
+        write(label, '(A,I0)') 'Turn: ', gs%turn_number
         call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 30)
 
         ! Item direction hint
         if (gs%input_state == INPUT_ITEM_DIR) then
-            call draw_text_at(sml_font, 'Choisir direction (fleches)', &
+            call draw_text_at(sml_font, 'Choose direction (arrows)', &
                               COL_YELLOW, 470, hud_y + 55)
         else if (is_my_turn() .and. .not. gs%game_over) then
-            call draw_text_at(sml_font, 'Espace = passer', &
+            call draw_text_at(sml_font, 'Space = pass', &
                               COL_DIM, 470, hud_y + 55)
         end if
     end subroutine
@@ -1615,6 +1618,100 @@ contains
             case (ITEM_SPEED);      col = COL_GREEN
             case default;           col = COL_GRAY
         end select
+    end subroutine
+
+    ! -----------------------------------------------------------------
+    ! Tooltip for items: HUD inventory slots + maze floor items
+    ! -----------------------------------------------------------------
+    subroutine render_game_tooltip()
+        integer(kind=c_int) :: mx_c, my_c
+        integer(kind=c_uint32_t) :: btn_state
+        integer :: mx, my, i, slot, itype, ni
+        integer :: csz, ox, oy, cell_x, cell_y
+        character(len=80) :: tip
+        type(sdl_surface), pointer :: surf
+        type(c_ptr) :: tex
+        type(sdl_rect) :: bgr
+        integer :: tw
+
+        btn_state = sdl_get_mouse_state(mx_c, my_c)
+        mx = int(mx_c); my = int(my_c)
+        tip = ' '
+
+        ! --- Check HUD inventory slots ---
+        ! Slots start at x=110, y=GAME_AREA_H+28, each 50 wide, 28 tall, spaced 56px
+        if (my >= GAME_AREA_H + 28 .and. my <= GAME_AREA_H + 56) then
+            if (am_host) then
+                ni = gs%hider%num_items
+            else
+                ni = gs%seeker%num_items
+            end if
+            do slot = 1, ni
+                if (mx >= 110 + (slot-1)*56 .and. mx < 110 + (slot-1)*56 + 50) then
+                    if (am_host) then
+                        itype = gs%hider%inventory(slot)
+                    else
+                        itype = gs%seeker%inventory(slot)
+                    end if
+                    tip = trim(game_item_name(itype)) // ': ' // &
+                          trim(game_item_description(itype))
+                    exit
+                end if
+            end do
+        end if
+
+        ! --- Check maze floor items ---
+        if (len_trim(tip) == 0 .and. my < GAME_AREA_H) then
+            call get_maze_layout(csz, ox, oy)
+            if (csz > 0) then
+                cell_x = (mx - ox) / csz + 1
+                cell_y = (my - oy) / csz + 1
+                if (cell_x >= 1 .and. cell_x <= gs%maze%w .and. &
+                    cell_y >= 1 .and. cell_y <= gs%maze%h) then
+                    ! Only show tooltip for items in currently visible cells
+                    if ((am_host .and. gs%h_visible(cell_x, cell_y)) .or. &
+                        (.not. am_host .and. gs%s_visible(cell_x, cell_y))) then
+                        do i = 1, gs%num_items
+                            if (gs%items(i)%active .and. &
+                                gs%items(i)%x == cell_x .and. &
+                                gs%items(i)%y == cell_y) then
+                                itype = gs%items(i)%itype
+                                tip = trim(game_item_name(itype)) // ': ' // &
+                                      trim(game_item_description(itype))
+                                exit
+                            end if
+                        end do
+                    end if
+                end if
+            end if
+        end if
+
+        if (len_trim(tip) == 0) return
+
+        ! Draw tooltip background + text near mouse
+        surf => ttf_render_text_solid(sml_font, trim(tip)//c_null_char, COL_WHITE)
+        if (.not. associated(surf)) return
+        tw = surf%w
+        bgr = sdl_rect(mx + 12, my - 24, tw + 10, 22)
+        ! Keep tooltip on screen
+        if (bgr%x + bgr%w > SCREEN_W) bgr%x = SCREEN_W - bgr%w - 4
+        if (bgr%x < 0) bgr%x = 4
+        if (bgr%y < 0) bgr%y = my + 20
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(20), uint8(20), uint8(30), uint8(240))
+        rc = sdl_render_fill_rect(main_renderer, bgr)
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(120), uint8(120), uint8(140), uint8(255))
+        rc = sdl_render_draw_rect(main_renderer, bgr)
+        tex = sdl_create_texture_from_surface(main_renderer, surf)
+        block
+            type(sdl_rect) :: sr, dr
+            sr = sdl_rect(0, 0, surf%w, surf%h)
+            dr = sdl_rect(bgr%x + 5, bgr%y + 2, surf%w, surf%h)
+            rc = sdl_render_copy(main_renderer, tex, sr, dr)
+        end block
+        call sdl_destroy_texture(tex)
+        call sdl_free_surface(surf)
     end subroutine
 
     ! -----------------------------------------------------------------
@@ -1635,14 +1732,14 @@ contains
             end if
             if (spd > 1) then
                 write(status_text, '(A,I0,A,I0,A)') &
-                    'VOTRE TOUR (', act, '/', spd, ' actions)'
+                    'YOUR TURN (', act, '/', spd, ' actions)'
             else
-                status_text = 'VOTRE TOUR'
+                status_text = 'YOUR TURN'
             end if
             call draw_text_centered(trim(status_text), sml_font, COL_GREEN, &
                                     SCREEN_W/2, 2)
         else
-            call draw_text_centered('Tour de l''adversaire...', sml_font, &
+            call draw_text_centered('Opponent''s turn...', sml_font, &
                                     COL_GRAY, SCREEN_W/2, 2)
         end if
     end subroutine
@@ -1664,11 +1761,11 @@ contains
                 uint8(200), uint8(100), uint8(100), uint8(255))
         rc = sdl_render_draw_rect(main_renderer, ovr)
 
-        call draw_text_centered('Quitter la partie ?', big_font, COL_YELLOW, &
+        call draw_text_centered('Quit the game?', big_font, COL_YELLOW, &
                                 SCREEN_W/2, 215)
-        call draw_text_centered('La carte sera revelee pour les deux joueurs', &
+        call draw_text_centered('The map will be revealed to both players', &
                                 sml_font, COL_GRAY, SCREEN_W/2, 260)
-        call draw_text_centered('[O] Confirmer   /   Autre touche = Annuler', &
+        call draw_text_centered('[Y] Confirm   /   Any other key = Cancel', &
                                 sml_font, COL_WHITE, SCREEN_W/2, 300)
     end subroutine
 
@@ -1687,7 +1784,7 @@ contains
                 uint8(200), uint8(200), uint8(100), uint8(255))
         rc = sdl_render_draw_line(main_renderer, 0, 27, SCREEN_W, 27)
 
-        call draw_text_centered('PARTIE TERMINEE  -  ' // trim(endgame_msg), &
+        call draw_text_centered('GAME OVER  -  ' // trim(endgame_msg), &
                                 sml_font, COL_YELLOW, SCREEN_W/2, 4)
     end subroutine
 
