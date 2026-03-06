@@ -156,6 +156,8 @@ program forplay
     game_ready        = .false.
     gs%initialized    = .false.
     recv_init_pos     = 0
+    cfg_maze_w        = DEFAULT_MAZE_W
+    cfg_maze_h        = DEFAULT_MAZE_H
     cfg_item_counts   = DEFAULT_ITEM_COUNT
     cfg_min_dist      = DEFAULT_MIN_DIST
     cfg_speed_h       = DEFAULT_SPEED
@@ -310,72 +312,71 @@ contains
     subroutine handle_host_click(mx, my)
         integer, intent(in) :: mx, my
         integer :: py, total_items
-        ! "Lancer la partie" button (dynamic Y based on param rows)
-        ! 9 rows * 26px + 258 start + 10 gap = py_btn ~= 502
-        py = 258 + 9*26 + 10
+
+        ! Buttons Y: below 5 left-column rows
+        py = 258 + 5*26
+        ! "Lancer la partie" button
         if (client_connected) then
-            if (mx>=250 .and. mx<=550 .and. my>=py .and. my<=py+50) then
+            if (mx>=250 .and. mx<=550 .and. my>=py+10 .and. my<=py+60) then
                 call launch_game_as_host()
             end if
         end if
         ! "Retour" button
-        py = py + 60
-        if (mx>=300 .and. mx<=500 .and. my>=py .and. my<=py+40) call go_back_to_menu()
+        if (mx>=300 .and. mx<=500 .and. my>=py+70 .and. my<=py+110) call go_back_to_menu()
 
-        ! Parameter +/- buttons (rows at y = 258, 284, 310, 336, 362, 388, 414, 440, 466)
-        ! Each row is 26px, so row i center = 258 + (i-1)*26
-        ! Row 1: Largeur (y=258)
-        if (my >= 245 .and. my <= 271) then
-            if (mx >= 440 .and. mx <= 470) cfg_maze_w = max(7,  cfg_maze_w - 2)
-            if (mx >= 530 .and. mx <= 560) cfg_maze_w = min(MAZE_MAX_W, cfg_maze_w + 2)
-        end if
-        ! Row 2: Hauteur (y=284)
-        if (my >= 271 .and. my <= 297) then
-            if (mx >= 440 .and. mx <= 470) cfg_maze_h = max(7,  cfg_maze_h - 2)
-            if (mx >= 530 .and. mx <= 560) cfg_maze_h = min(MAZE_MAX_H, cfg_maze_h + 2)
-        end if
-        ! Row 3: Distance min (y=310)
-        if (my >= 297 .and. my <= 323) then
-            if (mx >= 440 .and. mx <= 470) cfg_min_dist = max(1,  cfg_min_dist - 1)
-            if (mx >= 530 .and. mx <= 560) cfg_min_dist = min(99, cfg_min_dist + 1)
-        end if
-        ! Row 4: Nb Dash (y=336)
         total_items = sum(cfg_item_counts)
+
+        ! --- Left column (x_base=20): minus at 240, plus at 315 ---
+        ! L-Row 1: Largeur (y=258)
+        if (my >= 245 .and. my <= 271) then
+            if (mx >= 240 .and. mx <= 268) cfg_maze_w = max(7, cfg_maze_w - 2)
+            if (mx >= 315 .and. mx <= 343) cfg_maze_w = min(MAZE_MAX_W, cfg_maze_w + 2)
+        end if
+        ! L-Row 2: Hauteur (y=284)
+        if (my >= 271 .and. my <= 297) then
+            if (mx >= 240 .and. mx <= 268) cfg_maze_h = max(7, cfg_maze_h - 2)
+            if (mx >= 315 .and. mx <= 343) cfg_maze_h = min(MAZE_MAX_H, cfg_maze_h + 2)
+        end if
+        ! L-Row 3: Dist. min (y=310)
+        if (my >= 297 .and. my <= 323) then
+            if (mx >= 240 .and. mx <= 268) cfg_min_dist = max(1, cfg_min_dist - 1)
+            if (mx >= 315 .and. mx <= 343) cfg_min_dist = min(99, cfg_min_dist + 1)
+        end if
+        ! L-Row 4: Nb Dash (y=336)
         if (my >= 323 .and. my <= 349) then
-            if (mx >= 440 .and. mx <= 470) cfg_item_counts(ITEM_DASH) = max(0, cfg_item_counts(ITEM_DASH) - 1)
-            if (mx >= 530 .and. mx <= 560 .and. total_items < MAX_GROUND_ITEMS) &
+            if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_DASH) = max(0, cfg_item_counts(ITEM_DASH) - 1)
+            if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_DASH) = cfg_item_counts(ITEM_DASH) + 1
         end if
-        ! Row 5: Nb Vision (y=362)
-        total_items = sum(cfg_item_counts)
+        ! L-Row 5: Nb Vision (y=362)
         if (my >= 349 .and. my <= 375) then
-            if (mx >= 440 .and. mx <= 470) cfg_item_counts(ITEM_VISION) = max(0, cfg_item_counts(ITEM_VISION) - 1)
-            if (mx >= 530 .and. mx <= 560 .and. total_items < MAX_GROUND_ITEMS) &
+            if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_VISION) = max(0, cfg_item_counts(ITEM_VISION) - 1)
+            if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_VISION) = cfg_item_counts(ITEM_VISION) + 1
         end if
-        ! Row 6: Nb Lumiere (y=388)
-        total_items = sum(cfg_item_counts)
-        if (my >= 375 .and. my <= 401) then
-            if (mx >= 440 .and. mx <= 470) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
-            if (mx >= 530 .and. mx <= 560 .and. total_items < MAX_GROUND_ITEMS) &
+
+        ! --- Right column (x_base=410): minus at 630, plus at 705 ---
+        ! R-Row 1: Nb Lumiere (y=258)
+        if (my >= 245 .and. my <= 271) then
+            if (mx >= 630 .and. mx <= 658) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
+            if (mx >= 705 .and. mx <= 733 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_ILLUMINATE) = cfg_item_counts(ITEM_ILLUMINATE) + 1
         end if
-        ! Row 7: Nb Vitesse (y=414)
-        total_items = sum(cfg_item_counts)
-        if (my >= 401 .and. my <= 427) then
-            if (mx >= 440 .and. mx <= 470) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
-            if (mx >= 530 .and. mx <= 560 .and. total_items < MAX_GROUND_ITEMS) &
+        ! R-Row 2: Nb Vitesse (y=284)
+        if (my >= 271 .and. my <= 297) then
+            if (mx >= 630 .and. mx <= 658) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
+            if (mx >= 705 .and. mx <= 733 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_SPEED) = cfg_item_counts(ITEM_SPEED) + 1
         end if
-        ! Row 8: Actions/tour cacheur (y=440)
-        if (my >= 427 .and. my <= 453) then
-            if (mx >= 440 .and. mx <= 470) cfg_speed_h = max(1, cfg_speed_h - 1)
-            if (mx >= 530 .and. mx <= 560) cfg_speed_h = min(5, cfg_speed_h + 1)
+        ! R-Row 3: Vit. cacheur (y=310)
+        if (my >= 297 .and. my <= 323) then
+            if (mx >= 630 .and. mx <= 658) cfg_speed_h = max(1, cfg_speed_h - 1)
+            if (mx >= 705 .and. mx <= 733) cfg_speed_h = min(5, cfg_speed_h + 1)
         end if
-        ! Row 9: Actions/tour chercheur (y=466)
-        if (my >= 453 .and. my <= 479) then
-            if (mx >= 440 .and. mx <= 470) cfg_speed_s = max(1, cfg_speed_s - 1)
-            if (mx >= 530 .and. mx <= 560) cfg_speed_s = min(5, cfg_speed_s + 1)
+        ! R-Row 4: Vit. chercheur (y=336)
+        if (my >= 323 .and. my <= 349) then
+            if (mx >= 630 .and. mx <= 658) cfg_speed_s = max(1, cfg_speed_s - 1)
+            if (mx >= 705 .and. mx <= 733) cfg_speed_s = min(5, cfg_speed_s + 1)
         end if
     end subroutine
 
@@ -1029,39 +1030,34 @@ contains
                                     COL_YELLOW, SCREEN_W/2, 180)
         end if
 
-        ! --- Game parameters ---
+        ! --- Game parameters (two columns) ---
         call draw_text_centered('Parametres', sml_font, COL_GRAY, SCREEN_W/2, 220)
 
         ! Separator line
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(80), uint8(80), uint8(100), uint8(255))
-        rc = sdl_render_draw_line(main_renderer, 180, 243, 620, 243)
+        rc = sdl_render_draw_line(main_renderer, 30, 243, 770, 243)
 
+        ! Left column (x_base=20): Maze + Items
         py = 258
-        call draw_param_row(py, 'Largeur labyrinthe',   cfg_maze_w);            py = py + 26
-        call draw_param_row(py, 'Hauteur labyrinthe',   cfg_maze_h);            py = py + 26
-        call draw_param_row(py, 'Distance min spawn',   cfg_min_dist);          py = py + 26
+        call draw_param_row_at(20,  py, 'Largeur',    cfg_maze_w);                    py = py + 26
+        call draw_param_row_at(20,  py, 'Hauteur',    cfg_maze_h);                    py = py + 26
+        call draw_param_row_at(20,  py, 'Dist. min',  cfg_min_dist);                  py = py + 26
+        call draw_param_row_at(20,  py, 'Nb Dash',    cfg_item_counts(ITEM_DASH));    py = py + 26
+        call draw_param_row_at(20,  py, 'Nb Vision',  cfg_item_counts(ITEM_VISION));  py = py + 26
 
-        ! Item separator
-        rc = sdl_set_render_draw_color(main_renderer, &
-                uint8(60), uint8(60), uint8(80), uint8(255))
-        rc = sdl_render_draw_line(main_renderer, 200, py - 5, 580, py - 5)
+        ! Right column (x_base=410): Items (cont.) + Speed
+        py = 258
+        call draw_param_row_at(410, py, 'Nb Lumiere', cfg_item_counts(ITEM_ILLUMINATE)); py = py + 26
+        call draw_param_row_at(410, py, 'Nb Vitesse', cfg_item_counts(ITEM_SPEED));      py = py + 26
+        call draw_param_row_at(410, py, 'Vit. cacheur',   cfg_speed_h);                  py = py + 26
+        call draw_param_row_at(410, py, 'Vit. chercheur', cfg_speed_s);                  py = py + 26
 
-        call draw_param_row(py, 'Nb Dash',              cfg_item_counts(ITEM_DASH));       py = py + 26
-        call draw_param_row(py, 'Nb Vision',            cfg_item_counts(ITEM_VISION));     py = py + 26
-        call draw_param_row(py, 'Nb Lumiere',           cfg_item_counts(ITEM_ILLUMINATE)); py = py + 26
-        call draw_param_row(py, 'Nb Vitesse',           cfg_item_counts(ITEM_SPEED));      py = py + 26
-
-        ! Speed separator
-        rc = sdl_set_render_draw_color(main_renderer, &
-                uint8(60), uint8(60), uint8(80), uint8(255))
-        rc = sdl_render_draw_line(main_renderer, 200, py - 5, 580, py - 5)
-
-        call draw_param_row(py, 'Actions/tour cacheur',   cfg_speed_h);   py = py + 26
-        call draw_param_row(py, 'Actions/tour chercheur', cfg_speed_s);   py = py + 26
+        ! py for buttons = below 5 left rows
+        py = 258 + 5*26
 
         ! --- Tooltip on hover ---
-        call render_host_tooltip(py)
+        call render_host_tooltip()
 
         ! Buttons
         if (client_connected) then
@@ -1070,42 +1066,48 @@ contains
         call draw_button(300, py + 70, 200, 40, 'Retour', COL_RED)
     end subroutine
 
-    subroutine draw_param_row(y, label, val)
-        integer, intent(in) :: y, val
+    subroutine draw_param_row_at(x_base, y, label, val)
+        integer, intent(in) :: x_base, y, val
         character(len=*), intent(in) :: label
         character(len=16) :: vs
         type(sdl_rect) :: br
+        integer :: lx, mx, vx, px
 
-        call draw_text_at(sml_font, label, COL_WHITE, 200, y - SML_FONT_SZ/2)
+        ! Layout: label at x_base, minus at +220, value at +260, plus at +290
+        lx = x_base
+        mx = x_base + 220
+        vx = x_base + 265
+        px = x_base + 295
+
+        call draw_text_at(sml_font, label, COL_WHITE, lx, y - SML_FONT_SZ/2)
 
         ! Minus button
-        br = sdl_rect(440, y - 12, 30, 24)
+        br = sdl_rect(mx, y - 12, 28, 24)
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(60), uint8(40), uint8(40), uint8(255))
         rc = sdl_render_fill_rect(main_renderer, br)
         rc = sdl_set_render_draw_color(main_renderer, &
                 COL_RED%r, COL_RED%g, COL_RED%b, uint8(255))
         rc = sdl_render_draw_rect(main_renderer, br)
-        call draw_text_centered('-', sml_font, COL_RED, 455, y - SML_FONT_SZ/2)
+        call draw_text_centered('-', sml_font, COL_RED, mx + 14, y - SML_FONT_SZ/2)
 
         ! Value
         write(vs, '(I0)') val
-        call draw_text_centered(trim(vs), sml_font, COL_YELLOW, 500, y - SML_FONT_SZ/2)
+        call draw_text_centered(trim(vs), sml_font, COL_YELLOW, vx, y - SML_FONT_SZ/2)
 
         ! Plus button
-        br = sdl_rect(530, y - 12, 30, 24)
+        br = sdl_rect(px, y - 12, 28, 24)
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(40), uint8(60), uint8(40), uint8(255))
         rc = sdl_render_fill_rect(main_renderer, br)
         rc = sdl_set_render_draw_color(main_renderer, &
                 COL_GREEN%r, COL_GREEN%g, COL_GREEN%b, uint8(255))
         rc = sdl_render_draw_rect(main_renderer, br)
-        call draw_text_centered('+', sml_font, COL_GREEN, 545, y - SML_FONT_SZ/2)
+        call draw_text_centered('+', sml_font, COL_GREEN, px + 14, y - SML_FONT_SZ/2)
     end subroutine
 
     ! Tooltip for host parameters: show description when hovering over a row
-    subroutine render_host_tooltip(py_end)
-        integer, intent(in) :: py_end
+    subroutine render_host_tooltip()
         integer(kind=c_int) :: mx_c, my_c
         integer(kind=c_uint32_t) :: btn_state
         integer :: mx, my, row
@@ -1118,24 +1120,29 @@ contains
         btn_state = sdl_get_mouse_state(mx_c, my_c)
         mx = int(mx_c); my = int(my_c)
 
-        ! Only show tooltip when mouse is over the label area (x=180..430)
-        if (mx < 180 .or. mx > 430) return
-        if (my < 245 .or. my > 479) return
+        if (my < 245 .or. my > 375) return
+        row = (my - 245) / 26   ! 0..4
 
-        ! Determine which row (0-indexed)
-        row = (my - 245) / 26
         tip = ' '
-        select case (row)
-            case (0);  tip = 'Nombre de colonnes (impair recommande)'
-            case (1);  tip = 'Nombre de lignes (impair recommande)'
-            case (2);  tip = 'Distance min en cases entre departs'
-            case (3);  tip = 'Fonce en ligne droite, revele le chemin'
-            case (4);  tip = 'Rayon de vision +1 a +3 (aleatoire, permanent)'
-            case (5);  tip = 'Revele la carte entiere pour ce tour'
-            case (6);  tip = '+1 action par tour (permanent)'
-            case (7);  tip = 'Nombre d''actions par tour pour le cacheur'
-            case (8);  tip = 'Nombre d''actions par tour pour le chercheur'
-        end select
+        ! Left column labels: x 20..230
+        if (mx >= 20 .and. mx <= 340) then
+            select case (row)
+                case (0);  tip = 'Nombre de colonnes (impair recommande)'
+                case (1);  tip = 'Nombre de lignes (impair recommande)'
+                case (2);  tip = 'Distance min en cases entre departs'
+                case (3);  tip = 'Fonce en ligne droite, revele le chemin'
+                case (4);  tip = 'Rayon de vision +1 a +3 (aleatoire, permanent)'
+            end select
+        end if
+        ! Right column labels: x 410..620
+        if (mx >= 410 .and. mx <= 730) then
+            select case (row)
+                case (0);  tip = 'Revele la carte entiere pour ce tour'
+                case (1);  tip = '+1 action par tour (permanent)'
+                case (2);  tip = 'Actions par tour du cacheur'
+                case (3);  tip = 'Actions par tour du chercheur'
+            end select
+        end if
         if (len_trim(tip) == 0) return
 
         ! Draw tooltip background + text near mouse
@@ -1145,6 +1152,7 @@ contains
         bgr = sdl_rect(mx + 12, my - 24, tw + 10, 22)
         ! Keep tooltip on screen
         if (bgr%x + bgr%w > SCREEN_W) bgr%x = SCREEN_W - bgr%w - 4
+        if (bgr%x < 0) bgr%x = 4
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(20), uint8(20), uint8(30), uint8(240))
         rc = sdl_render_fill_rect(main_renderer, bgr)
