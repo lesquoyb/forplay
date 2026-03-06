@@ -112,7 +112,7 @@ jobs:
         run: |
           BREW_PREFIX=$(brew --prefix)
           fpm build --profile release --compiler gfortran-14 \
-            --flag "-L${BREW_PREFIX}/lib -I${BREW_PREFIX}/include"
+            --flag "-D__APPLE__ -L${BREW_PREFIX}/lib -I${BREW_PREFIX}/include"
 
       # ================================================================
       # Package
