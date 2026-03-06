@@ -32,6 +32,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       # ================================================================
       # Install dependencies — Windows (MSYS2)
@@ -68,9 +70,19 @@ jobs:
       # Install fpm
       # ================================================================
       - name: Install fpm
+        if: matrix.name != 'macos'
         uses: fortran-lang/setup-fpm@v7
         with:
           fpm-version: 'v0.10.0'
+
+      - name: Install fpm (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          # setup-fpm binary is linked against gcc@10; build fpm from source instead
+          git clone --depth 1 --branch v0.10.0 https://github.com/fortran-lang/fpm.git /tmp/fpm-src
+          cd /tmp/fpm-src
+          FC=gfortran-14 bash install.sh --prefix=/usr/local
+          fpm --version
 
       # ================================================================
       # Patch fpm.toml for platform-specific link libraries
