@@ -1,6 +1,25 @@
 # ForPlay
 
 Asymmetric multiplayer maze game over the network, written in Fortran with SDL2.
+## The story
+
+**THE LABYRINTH OF SHADOWS**
+
+Somewhere beneath the crumbling ruins of an ancient fortress lies a maze no map has ever captured… a labyrinth where light dies, echoes lie, and every step could be your last.
+
+You awaken alone in total darkness.
+
+The air is cold. The stone walls are damp. Somewhere in the distance, something moves.
+
+Are you **the Lost One** — a desperate soul trapped in a pitch-black maze, feeling your way along ancient walls, listening for danger, searching for the one path that leads to freedom? Your heart pounds with every sound… because you are **not alone**.
+
+Or are you **the Master of the Maze** — slow, silent, and patient. You know every corridor, every hidden passage, every deadly trap. The labyrinth is your kingdom, and the intruder is your prey. Set snares, close passages, and hunt the wanderer who dares invade your domain.
+
+In the darkness, only one will prevail.
+
+**Escape… or be captured.**
+**Survive… or become part of the labyrinth forever.**
+
 
 ## Gameplay
 
