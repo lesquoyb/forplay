@@ -93,6 +93,9 @@ module game_mod
         ! Per-player illuminate
         logical :: h_illuminate = .false.
         logical :: s_illuminate = .false.
+        ! Maze-reveal flags (host-configurable)
+        logical :: h_reveal    = .true.   ! hider sees wall layout
+        logical :: s_reveal    = .false.  ! seeker has fog of war
         ! General state
         integer :: turn         = 0      ! 0 = hider's turn, 1 = seeker's turn
         integer :: turn_number  = 1
@@ -111,9 +114,12 @@ contains
     ! Initialize a new game: generate maze, place items and players.
     ! min_dist: minimum BFS distance between hider and seeker spawns.
     ! =========================================================================
-    subroutine game_init(gs, maze_w, maze_h, item_counts, min_dist, speed_h, speed_s)
+    subroutine game_init(gs, maze_w, maze_h, item_counts, min_dist, &
+                         speed_h, speed_s, vision_h, vision_s, reveal_h, reveal_s)
         type(game_state), intent(out) :: gs
         integer, intent(in) :: maze_w, maze_h, min_dist, speed_h, speed_s
+        integer, intent(in) :: vision_h, vision_s
+        logical, intent(in) :: reveal_h, reveal_s
         integer, intent(in) :: item_counts(NUM_ITEM_TYPES)
 
         integer :: i, j, x, y, itype, attempts, d
@@ -158,7 +164,7 @@ contains
 
         gs%hider%x = hx
         gs%hider%y = hy
-        gs%hider%vision_radius = 2   ! limited vision for items/players
+        gs%hider%vision_radius = vision_h
         gs%hider%num_items = 0
         gs%hider%inventory = ITEM_NONE
         gs%hider%speed = speed_h
@@ -166,7 +172,7 @@ contains
 
         gs%seeker%x = sx
         gs%seeker%y = sy
-        gs%seeker%vision_radius = 1
+        gs%seeker%vision_radius = vision_s
         gs%seeker%num_items = 0
         gs%seeker%inventory = ITEM_NONE
         gs%seeker%speed = speed_s
@@ -211,6 +217,7 @@ contains
         gs%s_last_opp_x = 0; gs%s_last_opp_y = 0
         gs%h_opp_seen = .false.; gs%s_opp_seen = .false.
         gs%h_illuminate = .false.; gs%s_illuminate = .false.
+        gs%h_reveal    = reveal_h;  gs%s_reveal = reveal_s
         gs%turn        = 0          ! hider goes first
         gs%turn_number = 1
         gs%game_over   = .false.

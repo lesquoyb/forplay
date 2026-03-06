@@ -203,16 +203,22 @@ contains
             ! Non-blocking connect returns error immediately — that's expected
             ! On Windows: WSAEWOULDBLOCK (10035), on POSIX: EINPROGRESS (36/115)
             ! Any of these means "connection in progress"
-            status = get_errno()
-#if IS_WINDOWS
-            if (status /= 10035) then
-#else
-            if (status /= 36 .and. status /= 115) then
-#endif
-                write(error_msg, '(A,I0)') 'Error: connect failed, code=', status
-                call net_close(sock_fd)
-                sock_fd = -1
-                return
+            if (is_windows) then
+                status = WSAGetLastError()
+                if (status /= 10035) then
+                    write(error_msg, '(A,I0)') 'Error: connect failed, code=', status
+                    call net_close(sock_fd)
+                    sock_fd = -1
+                    return
+                end if
+            else
+                status = get_errno()
+                if (status /= 36 .and. status /= 115) then
+                    write(error_msg, '(A,I0)') 'Error: connect failed, code=', status
+                    call net_close(sock_fd)
+                    sock_fd = -1
+                    return
+                end if
             end if
         end if
         ! Connection is in progress (or already completed) — caller polls
@@ -277,15 +283,10 @@ contains
                 ! Not yet connected — still pending
                 result = 0
             end if
-#if IS_WINDOWS
-        else if (sock_err == 10035 .or. sock_err == 10037) then
-            ! WSAEWOULDBLOCK or WSAEALREADY — still in progress
+        else if ((is_windows .and. (sock_err == 10035 .or. sock_err == 10037)) .or. &
+                 (.not. is_windows .and. (sock_err == 36 .or. sock_err == 115))) then
+            ! Still in progress (WSAEWOULDBLOCK/WSAEALREADY on Windows, EINPROGRESS on POSIX)
             result = 0
-#else
-        else if (sock_err == 36 .or. sock_err == 115) then
-            ! EINPROGRESS — still in progress
-            result = 0
-#endif
         else
             ! Real error
             write(error_msg, '(A,I0)') 'Error: connection failed, code=', sock_err

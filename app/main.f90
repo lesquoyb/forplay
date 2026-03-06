@@ -30,7 +30,10 @@ program forplay
     integer, parameter :: DEFAULT_MAZE_H = 15
     integer, parameter :: DEFAULT_ITEM_COUNT = 3
     integer, parameter :: DEFAULT_MIN_DIST  = 15
-    integer, parameter :: DEFAULT_SPEED     = 1
+    integer, parameter :: DEFAULT_SPEED_H   = 2
+    integer, parameter :: DEFAULT_SPEED_S   = 1
+    integer, parameter :: DEFAULT_VISION_H  = 1
+    integer, parameter :: DEFAULT_VISION_S  = 2
     integer, parameter :: WALL_THICK    = 2
 
     ! Page identifiers
@@ -77,7 +80,8 @@ program forplay
 
     ! Game state
     type(game_state) :: gs
-    logical :: am_host           ! .true. = I am the hider (host)
+    logical :: am_host           ! .true. = I am the network host
+    logical :: am_hider          ! .true. = I play as the hider
     integer(c_int) :: game_fd    ! socket for game communication
     logical :: game_ready        ! .true. once init data exchanged
 
@@ -85,6 +89,9 @@ program forplay
     integer :: cfg_maze_w, cfg_maze_h, cfg_min_dist
     integer :: cfg_item_counts(NUM_ITEM_TYPES)
     integer :: cfg_speed_h, cfg_speed_s
+    integer :: cfg_vision_h, cfg_vision_s
+    logical :: cfg_reveal_h, cfg_reveal_s
+    logical :: cfg_host_hides
 
     ! Modal / end-game state
     logical :: show_quit_modal     ! confirmation dialog visible
@@ -154,6 +161,7 @@ program forplay
     public_ip         = ' '
     client_ip         = ' '
     am_host           = .false.
+    am_hider          = .false.
     game_fd           = -1
     game_ready        = .false.
     gs%initialized    = .false.
@@ -162,8 +170,13 @@ program forplay
     cfg_maze_h        = DEFAULT_MAZE_H
     cfg_item_counts   = DEFAULT_ITEM_COUNT
     cfg_min_dist      = DEFAULT_MIN_DIST
-    cfg_speed_h       = DEFAULT_SPEED
-    cfg_speed_s       = DEFAULT_SPEED
+    cfg_speed_h       = DEFAULT_SPEED_H
+    cfg_speed_s       = DEFAULT_SPEED_S
+    cfg_vision_h      = DEFAULT_VISION_H
+    cfg_vision_s      = DEFAULT_VISION_S
+    cfg_reveal_h      = .false.
+    cfg_reveal_s      = .true.
+    cfg_host_hides    = .true.
     show_quit_modal   = .false.
     game_ended        = .false.
     endgame_msg       = ' '
@@ -226,7 +239,7 @@ contains
     ! =====================================================================
     function is_my_turn() result(mine)
         logical :: mine
-        if (am_host) then
+        if (am_hider) then
             mine = (gs%turn == 0)   ! hider's turn
         else
             mine = (gs%turn == 1)   ! seeker's turn
@@ -238,7 +251,7 @@ contains
     ! =====================================================================
     function my_role() result(r)
         integer :: r
-        if (am_host) then
+        if (am_hider) then
             r = ROLE_HIDER
         else
             r = ROLE_SEEKER
@@ -318,72 +331,105 @@ contains
 
     subroutine handle_host_click(mx, my)
         integer, intent(in) :: mx, my
-        integer :: py, total_items
+        integer :: py, total_items, ly, ry
 
-        ! Buttons Y: below 5 left-column rows
-        py = 258 + 5*26
+        ! Compute button Y to match render_host
+        ! Left: General 4 rows at 210,236,262,288; Bonuses header+sep; 4 rows at 352,378,404,430
+        ! Right: Hider 3 rows at 210,236,262; Seeker header+sep; 3 rows at 326,352,378
+        ly = 456   ! left column final ly
+        ry = 404   ! right column final ry
+        py = max(ly, ry) + 10
+
         ! "Start game" button
         if (client_connected) then
-            if (mx>=250 .and. mx<=550 .and. my>=py+10 .and. my<=py+60) then
+            if (mx>=250 .and. mx<=550 .and. my>=py .and. my<=py+50) then
                 call launch_game_as_host()
             end if
         end if
         ! "Back" button
-        if (mx>=300 .and. mx<=500 .and. my>=py+70 .and. my<=py+110) call go_back_to_menu()
+        if (mx>=300 .and. mx<=500 .and. my>=py+60 .and. my<=py+100) call go_back_to_menu()
 
         total_items = sum(cfg_item_counts)
 
-        ! --- Left column (x_base=20): minus at 240, plus at 315 ---
-        ! L-Row 1: Largeur (y=258)
-        if (my >= 245 .and. my <= 271) then
+        ! ===== LEFT COLUMN (x_base=20): minus at 240, plus at 315 =====
+        ! -- General block --
+        ! Row: Width (y=210)
+        if (my >= 197 .and. my <= 223) then
             if (mx >= 240 .and. mx <= 268) cfg_maze_w = max(7, cfg_maze_w - 2)
             if (mx >= 315 .and. mx <= 343) cfg_maze_w = min(MAZE_MAX_W, cfg_maze_w + 2)
         end if
-        ! L-Row 2: Hauteur (y=284)
-        if (my >= 271 .and. my <= 297) then
+        ! Row: Height (y=236)
+        if (my >= 223 .and. my <= 249) then
             if (mx >= 240 .and. mx <= 268) cfg_maze_h = max(7, cfg_maze_h - 2)
             if (mx >= 315 .and. mx <= 343) cfg_maze_h = min(MAZE_MAX_H, cfg_maze_h + 2)
         end if
-        ! L-Row 3: Dist. min (y=310)
-        if (my >= 297 .and. my <= 323) then
+        ! Row: Min dist (y=262)
+        if (my >= 249 .and. my <= 275) then
             if (mx >= 240 .and. mx <= 268) cfg_min_dist = max(1, cfg_min_dist - 1)
             if (mx >= 315 .and. mx <= 343) cfg_min_dist = min(99, cfg_min_dist + 1)
         end if
-        ! L-Row 4: Nb Dash (y=336)
-        if (my >= 323 .and. my <= 349) then
+        ! Row: Host hides toggle (y=288), toggle at x=240..320
+        if (my >= 275 .and. my <= 301) then
+            if (mx >= 240 .and. mx <= 320) cfg_host_hides = .not. cfg_host_hides
+        end if
+
+        ! -- Bonuses block (rows shifted by +26 due to extra General row) --
+        ! Row: Nb Dash (y=352)
+        if (my >= 339 .and. my <= 365) then
             if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_DASH) = max(0, cfg_item_counts(ITEM_DASH) - 1)
             if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_DASH) = cfg_item_counts(ITEM_DASH) + 1
         end if
-        ! L-Row 5: Nb Vision (y=362)
-        if (my >= 349 .and. my <= 375) then
+        ! Row: Nb Vision (y=378)
+        if (my >= 365 .and. my <= 391) then
             if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_VISION) = max(0, cfg_item_counts(ITEM_VISION) - 1)
             if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_VISION) = cfg_item_counts(ITEM_VISION) + 1
         end if
-
-        ! --- Right column (x_base=410): minus at 630, plus at 705 ---
-        ! R-Row 1: Nb Light (y=258)
-        if (my >= 245 .and. my <= 271) then
-            if (mx >= 630 .and. mx <= 658) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
-            if (mx >= 705 .and. mx <= 733 .and. total_items < MAX_GROUND_ITEMS) &
+        ! Row: Nb Light (y=404)
+        if (my >= 391 .and. my <= 417) then
+            if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
+            if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_ILLUMINATE) = cfg_item_counts(ITEM_ILLUMINATE) + 1
         end if
-        ! R-Row 2: Nb Speed (y=284)
-        if (my >= 271 .and. my <= 297) then
-            if (mx >= 630 .and. mx <= 658) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
-            if (mx >= 705 .and. mx <= 733 .and. total_items < MAX_GROUND_ITEMS) &
+        ! Row: Nb Speed (y=430)
+        if (my >= 417 .and. my <= 443) then
+            if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
+            if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_SPEED) = cfg_item_counts(ITEM_SPEED) + 1
         end if
-        ! R-Row 3: Hider spd. (y=310)
-        if (my >= 297 .and. my <= 323) then
+
+        ! ===== RIGHT COLUMN (x_base=410): minus at 630, plus at 705 =====
+        ! -- Hider block --
+        ! Row: Speed (y=210)
+        if (my >= 197 .and. my <= 223) then
             if (mx >= 630 .and. mx <= 658) cfg_speed_h = max(1, cfg_speed_h - 1)
             if (mx >= 705 .and. mx <= 733) cfg_speed_h = min(5, cfg_speed_h + 1)
         end if
-        ! R-Row 4: Seeker spd. (y=336)
-        if (my >= 323 .and. my <= 349) then
+        ! Row: Vision (y=236)
+        if (my >= 223 .and. my <= 249) then
+            if (mx >= 630 .and. mx <= 658) cfg_vision_h = max(1, cfg_vision_h - 1)
+            if (mx >= 705 .and. mx <= 733) cfg_vision_h = min(10, cfg_vision_h + 1)
+        end if
+        ! Row: Maze revealed toggle (y=262), toggle at x=630..710
+        if (my >= 249 .and. my <= 275) then
+            if (mx >= 630 .and. mx <= 710) cfg_reveal_h = .not. cfg_reveal_h
+        end if
+
+        ! -- Seeker block --
+        ! Row: Speed (y=326)
+        if (my >= 313 .and. my <= 339) then
             if (mx >= 630 .and. mx <= 658) cfg_speed_s = max(1, cfg_speed_s - 1)
             if (mx >= 705 .and. mx <= 733) cfg_speed_s = min(5, cfg_speed_s + 1)
+        end if
+        ! Row: Vision (y=352)
+        if (my >= 339 .and. my <= 365) then
+            if (mx >= 630 .and. mx <= 658) cfg_vision_s = max(1, cfg_vision_s - 1)
+            if (mx >= 705 .and. mx <= 733) cfg_vision_s = min(10, cfg_vision_s + 1)
+        end if
+        ! Row: Maze revealed toggle (y=378), toggle at x=630..710
+        if (my >= 365 .and. my <= 391) then
+            if (mx >= 630 .and. mx <= 710) cfg_reveal_s = .not. cfg_reveal_s
         end if
     end subroutine
 
@@ -546,14 +592,14 @@ contains
         integer, intent(in) :: slot
         integer :: ni, itype
 
-        if (am_host) then
+        if (am_hider) then
             ni = gs%hider%num_items
         else
             ni = gs%seeker%num_items
         end if
         if (slot > ni) return
 
-        if (am_host) then
+        if (am_hider) then
             itype = gs%hider%inventory(slot)
         else
             itype = gs%seeker%inventory(slot)
@@ -803,7 +849,8 @@ contains
         if (mod(cfg_maze_h, 2) == 0) cfg_maze_h = cfg_maze_h + 1
 
         call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_item_counts, cfg_min_dist, &
-                      cfg_speed_h, cfg_speed_s)
+                      cfg_speed_h, cfg_speed_s, cfg_vision_h, cfg_vision_s, &
+                      cfg_reveal_h, cfg_reveal_s)
         call send_game_init()
 
         game_ready   = .true.
@@ -818,6 +865,7 @@ contains
     subroutine launch_game_as_host()
         ! Host generates maze and sends init data to client
         am_host = .true.
+        am_hider = cfg_host_hides
         game_fd = client_fd
         print *, '[HOST] launch_game_as_host: game_fd=', game_fd
 
@@ -826,7 +874,8 @@ contains
         if (mod(cfg_maze_h, 2) == 0) cfg_maze_h = cfg_maze_h + 1
 
         call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_item_counts, cfg_min_dist, &
-                      cfg_speed_h, cfg_speed_s)
+                      cfg_speed_h, cfg_speed_s, cfg_vision_h, cfg_vision_s, &
+                      cfg_reveal_h, cfg_reveal_s)
         print *, '[HOST] game_init done, maze=', gs%maze%w, 'x', gs%maze%h, &
                  ' items=', gs%num_items
         call send_game_init()
@@ -843,12 +892,18 @@ contains
         integer(c_int) :: st
 
         k = 0
-        ! Header: maze_w, maze_h, num_items, speed_h, speed_s
+        ! Header: maze_w, maze_h, num_items, speed_h, speed_s,
+        !         vision_h, vision_s, reveal_h, reveal_s, host_hides  (10 bytes)
         k = k+1; buf(k) = int(gs%maze%w, c_int8_t)
         k = k+1; buf(k) = int(gs%maze%h, c_int8_t)
         k = k+1; buf(k) = int(gs%num_items, c_int8_t)
         k = k+1; buf(k) = int(gs%hider%speed, c_int8_t)
         k = k+1; buf(k) = int(gs%seeker%speed, c_int8_t)
+        k = k+1; buf(k) = int(gs%hider%vision_radius, c_int8_t)
+        k = k+1; buf(k) = int(gs%seeker%vision_radius, c_int8_t)
+        if (gs%h_reveal) then; buf(k+1) = 1_c_int8_t; else; buf(k+1) = 0_c_int8_t; end if; k = k+1
+        if (gs%s_reveal) then; buf(k+1) = 1_c_int8_t; else; buf(k+1) = 0_c_int8_t; end if; k = k+1
+        if (am_hider) then; buf(k+1) = 1_c_int8_t; else; buf(k+1) = 0_c_int8_t; end if; k = k+1
 
         ! Maze cells (row-major)
         do iy = 1, gs%maze%h
@@ -879,6 +934,8 @@ contains
         integer(c_int8_t), target :: tmp(1024)
         integer(c_int) :: got
         integer :: k, mw, mh, ni, ix, iy, i, needed, sp_h, sp_s
+        integer :: vis_h, vis_s
+        logical :: rev_h, rev_s, host_hides
 
         ! Try to receive more data into persistent buffer
         call net_try_recv_bytes(game_fd, tmp, int(1024, c_int), got)
@@ -889,14 +946,19 @@ contains
             print *, '[CLIENT] recv init: got', got, 'bytes, total=', recv_init_pos
         end if
 
-        if (recv_init_pos < 5) return   ! not enough data yet
+        if (recv_init_pos < 10) return   ! not enough data yet (10-byte header)
 
         mw   = int(recv_init_buf(1))
         mh   = int(recv_init_buf(2))
         ni   = int(recv_init_buf(3))
         sp_h = int(recv_init_buf(4))
         sp_s = int(recv_init_buf(5))
-        needed = 5 + mw*mh + ni*3 + 4
+        vis_h = int(recv_init_buf(6))
+        vis_s = int(recv_init_buf(7))
+        rev_h = (recv_init_buf(8) /= 0)
+        rev_s = (recv_init_buf(9) /= 0)
+        host_hides = (recv_init_buf(10) /= 0)
+        needed = 10 + mw*mh + ni*3 + 4
 
         if (recv_init_pos < needed) then
             print *, '[CLIENT] need', needed, 'bytes, have', recv_init_pos
@@ -905,7 +967,7 @@ contains
         print *, '[CLIENT] full init received:', needed, 'bytes'
 
         ! Parse maze
-        k = 5
+        k = 10
         gs%maze%w = mw
         gs%maze%h = mh
         gs%maze%cells = 0
@@ -931,12 +993,12 @@ contains
         k = k+1; gs%seeker%y = int(recv_init_buf(k))
 
         ! Set up seeker/hider defaults
-        gs%hider%vision_radius  = 2
+        gs%hider%vision_radius  = vis_h
         gs%hider%num_items      = 0
         gs%hider%inventory      = ITEM_NONE
         gs%hider%speed          = sp_h
         gs%hider%actions_left   = sp_h
-        gs%seeker%vision_radius = 1
+        gs%seeker%vision_radius = vis_s
         gs%seeker%num_items     = 0
         gs%seeker%inventory     = ITEM_NONE
         gs%seeker%speed         = sp_s
@@ -956,6 +1018,8 @@ contains
         gs%s_opp_seen      = .false.
         gs%h_illuminate    = .false.
         gs%s_illuminate    = .false.
+        gs%h_reveal        = rev_h
+        gs%s_reveal        = rev_s
         gs%turn            = 0
         gs%turn_number     = 1
         gs%game_over       = .false.
@@ -965,6 +1029,8 @@ contains
         gs%initialized     = .true.
 
         call game_compute_visibility(gs)
+        ! Client role: opposite of host's choice
+        am_hider = .not. host_hides
         game_ready = .true.
     end subroutine
 
@@ -993,7 +1059,7 @@ contains
         atype = int(msg(1))
         param = int(msg(2))
 
-        if (am_host) then
+        if (am_hider) then
             opp_role = ROLE_SEEKER
         else
             opp_role = ROLE_HIDER
@@ -1061,58 +1127,83 @@ contains
     ! --- Host ---
     subroutine render_host()
         character(len=256) :: info
-        integer :: py
-        call draw_text_centered('Hosting', big_font, COL_CYAN, SCREEN_W/2, 30)
+        integer :: py, ly, ry
+        call draw_text_centered('Hosting', big_font, COL_CYAN, SCREEN_W/2, 20)
         write(info,'(A,A)') 'Local IP: ', trim(local_ip)
-        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 80)
+        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 64)
         write(info,'(A,A)') 'Public IP: ', trim(public_ip)
-        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 110)
-        call draw_text_at(sml_font, '(requires port forwarding)', COL_DIM, 490, 110)
+        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 90)
+        call draw_text_at(sml_font, '(requires port forwarding)', COL_DIM, 490, 90)
         write(info,'(A,I0)') 'Port: ', DEFAULT_PORT
-        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 140)
+        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 116)
 
         if (client_connected) then
             write(info,'(A,A)') 'Client: ', trim(client_ip)
-            call draw_text_centered(trim(info), sml_font, COL_GREEN, SCREEN_W/2, 180)
+            call draw_text_centered(trim(info), sml_font, COL_GREEN, SCREEN_W/2, 150)
         else
             call draw_text_centered('Waiting for a player...', sml_font, &
-                                    COL_YELLOW, SCREEN_W/2, 180)
+                                    COL_YELLOW, SCREEN_W/2, 150)
         end if
 
-        ! --- Game parameters (two columns) ---
-        call draw_text_centered('Parameters', sml_font, COL_GRAY, SCREEN_W/2, 220)
-
-        ! Separator line
+        ! ===== LEFT COLUMN =====
+        ! --- General block ---
+        call draw_text_at(sml_font, '--- General ---', COL_GRAY, 20, 180)
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(80), uint8(80), uint8(100), uint8(255))
-        rc = sdl_render_draw_line(main_renderer, 30, 243, 770, 243)
+        rc = sdl_render_draw_line(main_renderer, 20, 200, 390, 200)
 
-        ! Left column (x_base=20): Maze + Items
-        py = 258
-        call draw_param_row_at(20,  py, 'Width',      cfg_maze_w);                    py = py + 26
-        call draw_param_row_at(20,  py, 'Height',     cfg_maze_h);                    py = py + 26
-        call draw_param_row_at(20,  py, 'Min dist.',  cfg_min_dist);                  py = py + 26
-        call draw_param_row_at(20,  py, 'Nb Dash',    cfg_item_counts(ITEM_DASH));    py = py + 26
-        call draw_param_row_at(20,  py, 'Nb Vision',  cfg_item_counts(ITEM_VISION));  py = py + 26
+        ly = 210
+        call draw_param_row_at(20, ly, 'Width',     cfg_maze_w);  ly = ly + 26
+        call draw_param_row_at(20, ly, 'Height',    cfg_maze_h);  ly = ly + 26
+        call draw_param_row_at(20, ly, 'Min dist.', cfg_min_dist); ly = ly + 26
+        call draw_toggle_row_at(20, ly, 'Host hides', cfg_host_hides); ly = ly + 26
 
-        ! Right column (x_base=410): Items (cont.) + Speed
-        py = 258
-        call draw_param_row_at(410, py, 'Nb Light',  cfg_item_counts(ITEM_ILLUMINATE)); py = py + 26
-        call draw_param_row_at(410, py, 'Nb Speed',  cfg_item_counts(ITEM_SPEED));      py = py + 26
-        call draw_param_row_at(410, py, 'Hider spd.',    cfg_speed_h);                  py = py + 26
-        call draw_param_row_at(410, py, 'Seeker spd.',   cfg_speed_s);                  py = py + 26
+        ! --- Bonuses block ---
+        ly = ly + 8
+        call draw_text_at(sml_font, '--- Bonuses ---', COL_GRAY, 20, ly)
+        ly = ly + 20
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(80), uint8(80), uint8(100), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 20, ly, 390, ly)
+        ly = ly + 10
+        call draw_param_row_at(20, ly, 'Nb Dash',   cfg_item_counts(ITEM_DASH));    ly = ly + 26
+        call draw_param_row_at(20, ly, 'Nb Vision', cfg_item_counts(ITEM_VISION));  ly = ly + 26
+        call draw_param_row_at(20, ly, 'Nb Light',  cfg_item_counts(ITEM_ILLUMINATE)); ly = ly + 26
+        call draw_param_row_at(20, ly, 'Nb Speed',  cfg_item_counts(ITEM_SPEED));   ly = ly + 26
 
-        ! py for buttons = below 5 left rows
-        py = 258 + 5*26
+        ! ===== RIGHT COLUMN =====
+        ! --- Hider block ---
+        call draw_text_at(sml_font, '--- Hider ---', COL_GRAY, 410, 180)
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(80), uint8(80), uint8(100), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 410, 200, 770, 200)
+
+        ry = 210
+        call draw_param_row_at(410, ry, 'Speed',  cfg_speed_h);  ry = ry + 26
+        call draw_param_row_at(410, ry, 'Vision', cfg_vision_h); ry = ry + 26
+        call draw_toggle_row_at(410, ry, 'Maze revealed', cfg_reveal_h); ry = ry + 26
+
+        ! --- Seeker block ---
+        ry = ry + 8
+        call draw_text_at(sml_font, '--- Seeker ---', COL_GRAY, 410, ry)
+        ry = ry + 20
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(80), uint8(80), uint8(100), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 410, ry, 770, ry)
+        ry = ry + 10
+        call draw_param_row_at(410, ry, 'Speed',  cfg_speed_s);  ry = ry + 26
+        call draw_param_row_at(410, ry, 'Vision', cfg_vision_s); ry = ry + 26
+        call draw_toggle_row_at(410, ry, 'Maze revealed', cfg_reveal_s); ry = ry + 26
 
         ! --- Tooltip on hover ---
         call render_host_tooltip()
 
         ! Buttons
+        py = max(ly, ry) + 10
         if (client_connected) then
-            call draw_button(250, py + 10, 300, 50, 'Start game', COL_GREEN)
+            call draw_button(250, py, 300, 50, 'Start game', COL_GREEN)
         end if
-        call draw_button(300, py + 70, 200, 40, 'Back', COL_RED)
+        call draw_button(300, py + 60, 200, 40, 'Back', COL_RED)
     end subroutine
 
     subroutine draw_param_row_at(x_base, y, label, val)
@@ -1155,12 +1246,45 @@ contains
         call draw_text_centered('+', sml_font, COL_GREEN, px + 14, y - SML_FONT_SZ/2)
     end subroutine
 
+    subroutine draw_toggle_row_at(x_base, y, label, val)
+        integer, intent(in) :: x_base, y
+        character(len=*), intent(in) :: label
+        logical, intent(in) :: val
+        type(sdl_rect) :: br
+        integer :: lx, bx
+
+        lx = x_base
+        bx = x_base + 220
+
+        call draw_text_at(sml_font, label, COL_WHITE, lx, y - SML_FONT_SZ/2)
+
+        ! Toggle button (80 x 24)
+        br = sdl_rect(bx, y - 12, 80, 24)
+        if (val) then
+            rc = sdl_set_render_draw_color(main_renderer, &
+                    uint8(40), uint8(80), uint8(40), uint8(255))
+            rc = sdl_render_fill_rect(main_renderer, br)
+            rc = sdl_set_render_draw_color(main_renderer, &
+                    COL_GREEN%r, COL_GREEN%g, COL_GREEN%b, uint8(255))
+            rc = sdl_render_draw_rect(main_renderer, br)
+            call draw_text_centered('Yes', sml_font, COL_GREEN, bx + 40, y - SML_FONT_SZ/2)
+        else
+            rc = sdl_set_render_draw_color(main_renderer, &
+                    uint8(60), uint8(40), uint8(40), uint8(255))
+            rc = sdl_render_fill_rect(main_renderer, br)
+            rc = sdl_set_render_draw_color(main_renderer, &
+                    COL_RED%r, COL_RED%g, COL_RED%b, uint8(255))
+            rc = sdl_render_draw_rect(main_renderer, br)
+            call draw_text_centered('No', sml_font, COL_RED, bx + 40, y - SML_FONT_SZ/2)
+        end if
+    end subroutine
+
     ! Tooltip for host parameters: show description when hovering over a row
     subroutine render_host_tooltip()
         integer(kind=c_int) :: mx_c, my_c
         integer(kind=c_uint32_t) :: btn_state
-        integer :: mx, my, row
-        character(len=64) :: tip
+        integer :: mx, my
+        character(len=80) :: tip
         type(sdl_rect) :: bgr
         type(sdl_surface), pointer :: surf
         type(c_ptr) :: tex
@@ -1169,29 +1293,34 @@ contains
         btn_state = sdl_get_mouse_state(mx_c, my_c)
         mx = int(mx_c); my = int(my_c)
 
-        if (my < 245 .or. my > 375) return
-        row = (my - 245) / 26   ! 0..4
-
         tip = ' '
-        ! Left column labels: x 20..230
-        if (mx >= 20 .and. mx <= 340) then
-            select case (row)
-                case (0);  tip = 'Number of columns (odd recommended)'
-                case (1);  tip = 'Number of rows (odd recommended)'
-                case (2);  tip = 'Min distance in cells between spawns'
-                case (3);  tip = 'Dash forward in a straight line, reveals path'
-                case (4);  tip = 'Vision radius +1 to +3 (random, permanent)'
-            end select
+
+        ! --- Left column (x 20..390) ---
+        if (mx >= 20 .and. mx <= 390) then
+            ! General block: rows at y=210,236,262,288
+            if (my >= 197 .and. my <= 223) tip = 'Number of columns (odd recommended)'
+            if (my >= 223 .and. my <= 249) tip = 'Number of rows (odd recommended)'
+            if (my >= 249 .and. my <= 275) tip = 'Min distance in cells between spawns'
+            if (my >= 275 .and. my <= 301) tip = 'Host plays as the hider (Yes) or seeker (No)'
+            ! Bonuses block: rows at y=352,378,404,430
+            if (my >= 339 .and. my <= 365) tip = 'Dash forward in a straight line, reveals path'
+            if (my >= 365 .and. my <= 391) tip = 'Vision radius +1 to +3 (random, permanent)'
+            if (my >= 391 .and. my <= 417) tip = 'Reveals the entire map for this turn'
+            if (my >= 417 .and. my <= 443) tip = '+1 action per turn (permanent)'
         end if
-        ! Right column labels: x 410..620
-        if (mx >= 410 .and. mx <= 730) then
-            select case (row)
-                case (0);  tip = 'Reveals the entire map for this turn'
-                case (1);  tip = '+1 action per turn (permanent)'
-                case (2);  tip = 'Actions per turn for the hider'
-                case (3);  tip = 'Actions per turn for the seeker'
-            end select
+
+        ! --- Right column (x 410..770) ---
+        if (mx >= 410 .and. mx <= 770) then
+            ! Hider block: rows at y=210,236,262
+            if (my >= 197 .and. my <= 223) tip = 'Actions per turn for the hider'
+            if (my >= 223 .and. my <= 249) tip = 'Vision radius at game start for the hider'
+            if (my >= 249 .and. my <= 275) tip = 'Hider sees the full maze layout from start'
+            ! Seeker block: rows at y=326,352,378
+            if (my >= 313 .and. my <= 339) tip = 'Actions per turn for the seeker'
+            if (my >= 339 .and. my <= 365) tip = 'Vision radius at game start for the seeker'
+            if (my >= 365 .and. my <= 391) tip = 'Seeker sees the full maze layout from start'
         end if
+
         if (len_trim(tip) == 0) return
 
         ! Draw tooltip background + text near mouse
@@ -1285,23 +1414,33 @@ contains
     subroutine render_maze()
         integer :: csz, ox, oy   ! cell size, offset x/y
         integer :: ix, iy, sx, sy, c
-        logical :: is_vis, is_mem, show_cell
+        logical :: is_vis, is_mem, show_cell, my_reveal
         integer :: i
 
         call get_maze_layout(csz, ox, oy)
 
+        ! Determine if the local player has maze reveal
+        if (am_hider) then
+            my_reveal = gs%h_reveal
+        else
+            my_reveal = gs%s_reveal
+        end if
+
         do iy = 1, gs%maze%h
             do ix = 1, gs%maze%w
                 ! Determine visibility for the current player's view
-                if (am_host) then
-                    ! Hider: always knows wall layout, limited vision for items/players
+                if (am_hider) then
                     is_vis = gs%h_visible(ix, iy)
                     is_mem = gs%h_visited(ix, iy)
-                    show_cell = .true.   ! hider sees all walls
                 else
-                    ! Seeker: fog of war for everything
                     is_vis = gs%s_visible(ix, iy)
                     is_mem = gs%s_visited(ix, iy)
+                end if
+
+                ! show_cell: if maze is revealed, always show walls
+                if (my_reveal) then
+                    show_cell = .true.
+                else
                     show_cell = is_vis .or. is_mem
                 end if
 
@@ -1314,8 +1453,8 @@ contains
                 ! Draw floor
                 call draw_cell_floor(sx, sy, csz, is_vis)
 
-                ! Draw walls (hider: always bright; seeker: bright if visible)
-                if (am_host) then
+                ! Draw walls (bright if visible or if maze is revealed)
+                if (my_reveal) then
                     call draw_cell_walls(sx, sy, csz, c, .true.)
                 else
                     call draw_cell_walls(sx, sy, csz, c, is_vis)
@@ -1334,7 +1473,7 @@ contains
                     ! Not visible: show ghost if previously seen
                     do i = 1, gs%num_items
                         if (gs%items(i)%x == ix .and. gs%items(i)%y == iy) then
-                            if (am_host) then
+                            if (am_hider) then
                                 if (gs%h_item_seen(i)) &
                                     call draw_ghost_item(sx, sy, csz)
                             else
@@ -1476,7 +1615,7 @@ contains
         pad = csz / 5
         if (pad < 2) pad = 2
 
-        if (am_host) then
+        if (am_hider) then
             ! I'm the hider -- always draw myself (red)
             sx = ox + (gs%hider%x - 1) * csz
             sy = oy + (gs%hider%y - 1) * csz
@@ -1557,14 +1696,14 @@ contains
         rc = sdl_render_draw_line(main_renderer, 0, hud_y, SCREEN_W, hud_y)
 
         ! Show role
-        if (am_host) then
+        if (am_hider) then
             call draw_text_at(sml_font, 'Role: Hider', COL_RED, 15, hud_y + 5)
         else
             call draw_text_at(sml_font, 'Role: Seeker', COL_CYAN, 15, hud_y + 5)
         end if
 
         ! Show inventory
-        if (am_host) then
+        if (am_hider) then
             ni = gs%hider%num_items
         else
             ni = gs%seeker%num_items
@@ -1576,7 +1715,7 @@ contains
             ! Draw slot
             ir = sdl_rect(bx, hud_y + 28, 50, 28)
             if (i <= ni) then
-                if (am_host) then
+                if (am_hider) then
                     itype = gs%hider%inventory(i)
                 else
                     itype = gs%seeker%inventory(i)
@@ -1627,7 +1766,7 @@ contains
 
         ! --- Normal HUD right-side info ---
         ! Vision radius (for both players now)
-        if (am_host) then
+        if (am_hider) then
             write(label, '(A,I0)') 'Vision: ', gs%hider%vision_radius
             call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
             if (gs%hider%speed > 1) then
@@ -1690,14 +1829,14 @@ contains
         ! --- Check HUD inventory slots ---
         ! Slots start at x=110, y=GAME_AREA_H+28, each 50 wide, 28 tall, spaced 56px
         if (my >= GAME_AREA_H + 28 .and. my <= GAME_AREA_H + 56) then
-            if (am_host) then
+            if (am_hider) then
                 ni = gs%hider%num_items
             else
                 ni = gs%seeker%num_items
             end if
             do slot = 1, ni
                 if (mx >= 110 + (slot-1)*56 .and. mx < 110 + (slot-1)*56 + 50) then
-                    if (am_host) then
+                    if (am_hider) then
                         itype = gs%hider%inventory(slot)
                     else
                         itype = gs%seeker%inventory(slot)
@@ -1718,8 +1857,8 @@ contains
                 if (cell_x >= 1 .and. cell_x <= gs%maze%w .and. &
                     cell_y >= 1 .and. cell_y <= gs%maze%h) then
                     ! Only show tooltip for items in currently visible cells
-                    if ((am_host .and. gs%h_visible(cell_x, cell_y)) .or. &
-                        (.not. am_host .and. gs%s_visible(cell_x, cell_y))) then
+                    if ((am_hider .and. gs%h_visible(cell_x, cell_y)) .or. &
+                        (.not. am_hider .and. gs%s_visible(cell_x, cell_y))) then
                         do i = 1, gs%num_items
                             if (gs%items(i)%active .and. &
                                 gs%items(i)%x == cell_x .and. &
@@ -1774,7 +1913,7 @@ contains
 
         ! Turn indicator at top of screen
         if (is_my_turn()) then
-            if (am_host) then
+            if (am_hider) then
                 spd = gs%hider%speed; act = gs%hider%actions_left
             else
                 spd = gs%seeker%speed; act = gs%seeker%actions_left
