@@ -160,8 +160,6 @@ program forplay
     cfg_min_dist      = DEFAULT_MIN_DIST
     cfg_speed_h       = DEFAULT_SPEED
     cfg_speed_s       = DEFAULT_SPEED
-    cfg_num_items     = DEFAULT_NUM_ITEMS
-    cfg_min_dist      = DEFAULT_MIN_DIST
     show_quit_modal   = .false.
     game_ended        = .false.
     endgame_msg       = ' '
