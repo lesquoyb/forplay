@@ -67,48 +67,21 @@ jobs:
       # ================================================================
       # Install fpm
       # ================================================================
-      - name: Install fpm (Windows)
-        if: matrix.name == 'windows'
-        shell: msys2 {0}
-        run: |
-          FPM_VERSION="0.10.0"
-          curl -sSL -o fpm.zip "https://github.com/fortran-lang/fpm/releases/download/v${FPM_VERSION}/fpm-${FPM_VERSION}-windows-x86_64.zip"
-          unzip -o fpm.zip -d fpm-bin
-          mv fpm-bin/fpm.exe /mingw64/bin/fpm.exe
-          fpm --version
-
-      - name: Install fpm (Linux)
-        if: matrix.name == 'linux'
-        run: |
-          FPM_VERSION="0.10.0"
-          curl -sSL -o fpm "https://github.com/fortran-lang/fpm/releases/download/v${FPM_VERSION}/fpm-${FPM_VERSION}-linux-x86_64"
-          chmod +x fpm
-          sudo mv fpm /usr/local/bin/fpm
-          fpm --version
-
-      - name: Install fpm (macOS)
-        if: matrix.name == 'macos'
-        run: |
-          FPM_VERSION="0.10.0"
-          curl -sSL -o fpm "https://github.com/fortran-lang/fpm/releases/download/v${FPM_VERSION}/fpm-${FPM_VERSION}-macos-arm64"
-          chmod +x fpm
-          sudo mv fpm /usr/local/bin/fpm
-          fpm --version
+      - name: Install fpm
+        uses: fortran-lang/setup-fpm@v7
+        with:
+          fpm-version: 'v0.10.0'
 
       # ================================================================
       # Patch fpm.toml for platform-specific link libraries
       # ================================================================
       - name: Patch link libraries (Linux)
         if: matrix.name == 'linux'
-        run: |
-          sed -i 's/^link = .*/link = ["SDL2", "SDL2_ttf"]/' fpm.toml
-          sed -i '/^macros/d' deps/fortran-socket/fpm.toml
+        run: sed -i 's/^link = .*/link = ["SDL2", "SDL2_ttf"]/' fpm.toml
 
       - name: Patch link libraries (macOS)
         if: matrix.name == 'macos'
-        run: |
-          sed -i '' 's/^link = .*/link = ["SDL2", "SDL2_ttf"]/' fpm.toml
-          sed -i '' '/^macros/d' deps/fortran-socket/fpm.toml
+        run: sed -i '' 's/^link = .*/link = ["SDL2", "SDL2_ttf"]/' fpm.toml
 
       # ================================================================
       # Build
@@ -116,7 +89,7 @@ jobs:
       - name: Build (Windows)
         if: matrix.name == 'windows'
         shell: msys2 {0}
-        run: fpm build --profile release
+        run: fpm build --profile release --flag "-D_WIN32"
 
       - name: Build (Linux)
         if: matrix.name == 'linux'
