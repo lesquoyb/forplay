@@ -72,6 +72,8 @@ program forplay
     character(len=16)  :: input_port
     integer :: active_field
     logical :: connecting
+    integer(c_uint32_t) :: connect_start_tick  ! SDL tick when connect began
+    integer, parameter :: CONNECT_TIMEOUT_MS = 5000  ! 5 second timeout
 
     ! Game state
     type(game_state) :: gs
@@ -176,6 +178,11 @@ program forplay
         if (current_page == PAGE_HOST .and. waiting_for_client &
             .and. .not. client_connected) then
             call check_for_client()
+        end if
+
+        ! Async client connect
+        if (current_page == PAGE_JOIN .and. connecting) then
+            call poll_connection()
         end if
 
         ! Game: always poll for opponent actions (quit can arrive at any time)
@@ -382,6 +389,17 @@ contains
 
     subroutine handle_join_click(mx, my)
         integer, intent(in) :: mx, my
+        if (connecting) then
+            ! While connecting, only allow "Back" (which cancels)
+            if (mx>=300 .and. mx<=500 .and. my>=500 .and. my<=550) then
+                if (my_socket >= 0) then
+                    call net_close(my_socket); my_socket = -1
+                end if
+                connecting = .false.
+                call go_back_to_menu()
+            end if
+            return
+        end if
         if (mx>=250 .and. mx<=600 .and. my>=220 .and. my<=260) then
             active_field = 0; call c_sdl_start_text_input()
         end if
@@ -633,23 +651,53 @@ contains
         end if
         read(input_port, *, err=99) pi
         pv = int(pi, c_int16_t)
-        connecting    = .true.
         error_message = ' '
-        call net_connect_to_server(trim(input_ip), pv, my_socket, err)
-        connecting = .false.
+        call net_begin_connect(trim(input_ip), pv, my_socket, err)
         if (my_socket < 0) then; error_message = err; return; end if
-        ! Connected as client → enter game, wait for host init
-        am_host    = .false.
-        game_fd    = my_socket
-        game_ready = .false.
-        gs%initialized = .false.
-        recv_init_pos = 0
-        error_message = ' '
-        current_page  = PAGE_GAME
-        print *, '[CLIENT] connected, game_fd=', game_fd, ' waiting for init'
-        call c_sdl_stop_text_input()
+        ! Connect started — poll each frame until done
+        connecting = .true.
+        connect_start_tick = sdl_get_ticks()
         return
     99  error_message = 'Error: invalid port'
+    end subroutine
+
+    ! Poll the async connect each frame
+    subroutine poll_connection()
+        integer :: res
+        character(len=256) :: err
+        integer(c_uint32_t) :: elapsed
+
+        elapsed = sdl_get_ticks() - connect_start_tick
+
+        call net_poll_connect(my_socket, res, err)
+
+        if (res == 1) then
+            ! Connected!
+            connecting = .false.
+            am_host    = .false.
+            game_fd    = my_socket
+            game_ready = .false.
+            gs%initialized = .false.
+            recv_init_pos = 0
+            error_message = ' '
+            current_page  = PAGE_GAME
+            print *, '[CLIENT] connected, game_fd=', game_fd, ' waiting for init'
+            call c_sdl_stop_text_input()
+        else if (res == -1) then
+            ! Failed
+            connecting = .false.
+            error_message = err
+        else
+            ! Still pending — check timeout
+            if (elapsed > CONNECT_TIMEOUT_MS) then
+                connecting = .false.
+                if (my_socket >= 0) then
+                    call net_close(my_socket)
+                    my_socket = -1
+                end if
+                error_message = 'Error: connection timed out'
+            end if
+        end if
     end subroutine
 
     subroutine check_for_client()
@@ -1019,6 +1067,7 @@ contains
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 80)
         write(info,'(A,A)') 'Public IP: ', trim(public_ip)
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 110)
+        call draw_text_at(sml_font, '(requires port forwarding)', COL_DIM, 490, 110)
         write(info,'(A,I0)') 'Port: ', DEFAULT_PORT
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 140)
 

@@ -12,7 +12,7 @@ module network
 
     public :: net_init, net_cleanup
     public :: net_start_server, net_close
-    public :: net_connect_to_server
+    public :: net_begin_connect, net_poll_connect
     public :: net_get_local_ip, net_get_public_ip
     public :: net_try_accept_nonblocking
     public :: net_send_bytes, net_recv_all, net_try_recv_bytes
@@ -62,7 +62,7 @@ contains
 
         server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         if (server_fd < 0) then
-            error_msg = 'Erreur: creation du socket echouee'
+            error_msg = 'Error: socket creation failed'
             server_fd = -1
             return
         end if
@@ -79,7 +79,7 @@ contains
 
         status = bind(server_fd, c_loc(addr), int(c_sizeof(addr), c_int))
         if (status /= 0) then
-            write(error_msg, '(A,I0)') 'Erreur: bind echoue, code=', get_errno()
+            write(error_msg, '(A,I0)') 'Error: bind failed, code=', get_errno()
             call net_close(server_fd)
             server_fd = -1
             return
@@ -87,7 +87,7 @@ contains
 
         status = listen(server_fd, 1)
         if (status /= 0) then
-            write(error_msg, '(A,I0)') 'Erreur: listen echoue, code=', get_errno()
+            write(error_msg, '(A,I0)') 'Error: listen failed, code=', get_errno()
             call net_close(server_fd)
             server_fd = -1
             return
@@ -157,7 +157,12 @@ contains
     ! ==================================================================
     ! Connect to a remote server
     ! ==================================================================
-    subroutine net_connect_to_server(ip_str, port, sock_fd, error_msg)
+    ! ==================================================================
+    ! Begin a non-blocking connect. Returns the socket fd (>= 0) if
+    ! the connect was initiated. The caller must then call
+    ! net_poll_connect() each frame to check for completion.
+    ! ==================================================================
+    subroutine net_begin_connect(ip_str, port, sock_fd, error_msg)
         character(len=*), intent(in) :: ip_str
         integer(c_int16_t), intent(in) :: port
         integer(c_int), intent(out) :: sock_fd
@@ -165,12 +170,13 @@ contains
 
         type(sockaddr_in), target :: addr
         integer(c_int) :: status
+        integer(c_long), target :: mode
 
         error_msg = ' '
 
         sock_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         if (sock_fd < 0) then
-            error_msg = 'Erreur: creation du socket echouee'
+            error_msg = 'Error: socket creation failed'
             sock_fd = -1
             return
         end if
@@ -180,7 +186,7 @@ contains
         addr%sin_addr   = inet_addr(trim(ip_str) // c_null_char)
 
         if (addr%sin_addr == -1) then
-            error_msg = 'Erreur: adresse IP invalide'
+            error_msg = 'Error: invalid IP address'
             call net_close(sock_fd)
             sock_fd = -1
             return
@@ -188,12 +194,104 @@ contains
 
         addr%sin_zero = c_null_char
 
+        ! Set non-blocking before connect
+        mode = 1_c_long
+        status = ioctlsocket(sock_fd, FIONBIO, c_loc(mode))
+
         status = connect(sock_fd, c_loc(addr), int(c_sizeof(addr), c_int))
         if (status /= 0) then
-            write(error_msg, '(A,I0)') 'Erreur: connexion echouee, code=', get_errno()
+            ! Non-blocking connect returns error immediately — that's expected
+            ! On Windows: WSAEWOULDBLOCK (10035), on POSIX: EINPROGRESS (36/115)
+            ! Any of these means "connection in progress"
+            status = get_errno()
+#if IS_WINDOWS
+            if (status /= 10035) then
+#else
+            if (status /= 36 .and. status /= 115) then
+#endif
+                write(error_msg, '(A,I0)') 'Error: connect failed, code=', status
+                call net_close(sock_fd)
+                sock_fd = -1
+                return
+            end if
+        end if
+        ! Connection is in progress (or already completed) — caller polls
+    end subroutine
+
+    ! ==================================================================
+    ! Poll a non-blocking connect for completion.
+    !   result:  1 = connected,  0 = still pending,  -1 = failed
+    ! On success, the socket is restored to blocking mode.
+    ! ==================================================================
+    subroutine net_poll_connect(sock_fd, result, error_msg)
+        integer(c_int), intent(inout) :: sock_fd
+        integer, intent(out) :: result
+        character(len=*), intent(out) :: error_msg
+
+        integer(c_int), target :: sock_err, optlen
+        integer(c_int) :: res
+        integer(c_long), target :: mode
+
+        error_msg = ' '
+        result = 0  ! pending
+
+        ! Try a zero-length connect again — if already connected it
+        ! succeeds; if still pending it fails with EALREADY/WSAEALREADY
+        ! Instead, use getsockopt(SO_ERROR) which is the standard way.
+        optlen = int(c_sizeof(sock_err), c_int)
+        sock_err = 0
+        res = getsockopt(sock_fd, SOL_SOCKET, SO_ERROR, &
+                         c_loc(sock_err), c_loc(optlen))
+        if (res /= 0) then
+            ! getsockopt itself failed — treat as error
+            error_msg = 'Error: connection check failed'
             call net_close(sock_fd)
             sock_fd = -1
+            result = -1
             return
+        end if
+
+        if (sock_err == 0) then
+            ! SO_ERROR == 0 means connected (or never started connecting yet).
+            ! Try a second getsockopt to confirm — if the socket is truly
+            ! connected, getpeername will succeed.
+            block
+                type(sockaddr_in), target :: peer
+                integer(c_int), target :: plen
+                plen = int(c_sizeof(peer), c_int)
+                res = getpeername(sock_fd, c_loc(peer), c_loc(plen))
+            end block
+            if (res == 0) then
+                ! Connected! Restore blocking mode
+                mode = 0_c_long
+                res = ioctlsocket(sock_fd, FIONBIO, c_loc(mode))
+                ! Set TCP_NODELAY
+                block
+                    integer(c_int), target :: opt_on
+                    opt_on = 1_c_int
+                    res = setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &
+                                     c_loc(opt_on), int(c_sizeof(opt_on), c_int))
+                end block
+                result = 1
+            else
+                ! Not yet connected — still pending
+                result = 0
+            end if
+#if IS_WINDOWS
+        else if (sock_err == 10035 .or. sock_err == 10037) then
+            ! WSAEWOULDBLOCK or WSAEALREADY — still in progress
+            result = 0
+#else
+        else if (sock_err == 36 .or. sock_err == 115) then
+            ! EINPROGRESS — still in progress
+            result = 0
+#endif
+        else
+            ! Real error
+            write(error_msg, '(A,I0)') 'Error: connection failed, code=', sock_err
+            call net_close(sock_fd)
+            sock_fd = -1
+            result = -1
         end if
     end subroutine
 
