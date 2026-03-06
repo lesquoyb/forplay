@@ -109,9 +109,7 @@ jobs:
 
       - name: Build (macOS)
         if: matrix.name == 'macos'
-        run: fpm build --profile release
-        env:
-          FC: gfortran-14
+        run: fpm build --profile release --compiler gfortran-14
 
       # ================================================================
       # Package
