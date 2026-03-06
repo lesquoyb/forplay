@@ -109,7 +109,10 @@ jobs:
 
       - name: Build (macOS)
         if: matrix.name == 'macos'
-        run: fpm build --profile release --compiler gfortran-14
+        run: |
+          BREW_PREFIX=$(brew --prefix)
+          fpm build --profile release --compiler gfortran-14 \
+            --flag "-L${BREW_PREFIX}/lib -I${BREW_PREFIX}/include"
 
       # ================================================================
       # Package
