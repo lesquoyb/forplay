@@ -104,6 +104,7 @@ jobs:
         run: |
           pacman -S --noconfirm mingw-w64-x86_64-imagemagick
           magick resources/icon.png -define icon:auto-resize=256,128,64,48,32,16 resources/forplay.ico
+          cd "$GITHUB_WORKSPACE"
           windres forplay.rc -o forplay_res.o
 
       - name: Generate icon (Linux)
@@ -133,7 +134,7 @@ jobs:
       - name: Build (Windows)
         if: matrix.name == 'windows'
         shell: msys2 {0}
-        run: fpm build --profile release --flag "-D_WIN32" --link-flag "forplay_res.o"
+        run: fpm build --profile release --flag "-D_WIN32" --link-flag "$GITHUB_WORKSPACE/forplay_res.o"
 
       - name: Build (Linux)
         if: matrix.name == 'linux'
