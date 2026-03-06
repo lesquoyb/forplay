@@ -28,8 +28,9 @@ program forplay
     integer, parameter :: GAME_AREA_H   = SCREEN_H - HUD_H  ! 510
     integer, parameter :: DEFAULT_MAZE_W = 21
     integer, parameter :: DEFAULT_MAZE_H = 15
-    integer, parameter :: DEFAULT_NUM_ITEMS = 12
+    integer, parameter :: DEFAULT_ITEM_COUNT = 3
     integer, parameter :: DEFAULT_MIN_DIST  = 15
+    integer, parameter :: DEFAULT_SPEED     = 1
     integer, parameter :: WALL_THICK    = 2
 
     ! Page identifiers
@@ -79,7 +80,9 @@ program forplay
     logical :: game_ready        ! .true. once init data exchanged
 
     ! Game parameters (configurable by host before launch)
-    integer :: cfg_maze_w, cfg_maze_h, cfg_num_items, cfg_min_dist
+    integer :: cfg_maze_w, cfg_maze_h, cfg_min_dist
+    integer :: cfg_item_counts(NUM_ITEM_TYPES)
+    integer :: cfg_speed_h, cfg_speed_s
 
     ! Modal / end-game state
     logical :: show_quit_modal     ! confirmation dialog visible
@@ -153,8 +156,10 @@ program forplay
     game_ready        = .false.
     gs%initialized    = .false.
     recv_init_pos     = 0
-    cfg_maze_w        = DEFAULT_MAZE_W
-    cfg_maze_h        = DEFAULT_MAZE_H
+    cfg_item_counts   = DEFAULT_ITEM_COUNT
+    cfg_min_dist      = DEFAULT_MIN_DIST
+    cfg_speed_h       = DEFAULT_SPEED
+    cfg_speed_s       = DEFAULT_SPEED
     cfg_num_items     = DEFAULT_NUM_ITEMS
     cfg_min_dist      = DEFAULT_MIN_DIST
     show_quit_modal   = .false.
@@ -306,35 +311,73 @@ contains
 
     subroutine handle_host_click(mx, my)
         integer, intent(in) :: mx, my
-        ! "Lancer la partie" button
+        integer :: py, total_items
+        ! "Lancer la partie" button (dynamic Y based on param rows)
+        ! 9 rows * 26px + 258 start + 10 gap = py_btn ~= 502
+        py = 258 + 9*26 + 10
         if (client_connected) then
-            if (mx>=250 .and. mx<=550 .and. my>=450 .and. my<=510) then
+            if (mx>=250 .and. mx<=550 .and. my>=py .and. my<=py+50) then
                 call launch_game_as_host()
             end if
         end if
         ! "Retour" button
-        if (mx>=300 .and. mx<=500 .and. my>=540 .and. my<=590) call go_back_to_menu()
+        py = py + 60
+        if (mx>=300 .and. mx<=500 .and. my>=py .and. my<=py+40) call go_back_to_menu()
 
-        ! Parameter +/- buttons (each row: label at x=180, -btn at x=440, value, +btn at x=530)
-        ! Row 1: Largeur (y ~ 240)
-        if (my >= 235 .and. my <= 265) then
+        ! Parameter +/- buttons (rows at y = 258, 284, 310, 336, 362, 388, 414, 440, 466)
+        ! Each row is 26px, so row i center = 258 + (i-1)*26
+        ! Row 1: Largeur (y=258)
+        if (my >= 245 .and. my <= 271) then
             if (mx >= 440 .and. mx <= 470) cfg_maze_w = max(7,  cfg_maze_w - 2)
             if (mx >= 530 .and. mx <= 560) cfg_maze_w = min(MAZE_MAX_W, cfg_maze_w + 2)
         end if
-        ! Row 2: Hauteur (y ~ 270)
-        if (my >= 265 .and. my <= 295) then
+        ! Row 2: Hauteur (y=284)
+        if (my >= 271 .and. my <= 297) then
             if (mx >= 440 .and. mx <= 470) cfg_maze_h = max(7,  cfg_maze_h - 2)
             if (mx >= 530 .and. mx <= 560) cfg_maze_h = min(MAZE_MAX_H, cfg_maze_h + 2)
         end if
-        ! Row 3: Objets (y ~ 300)
-        if (my >= 295 .and. my <= 325) then
-            if (mx >= 440 .and. mx <= 470) cfg_num_items = max(0,  cfg_num_items - 1)
-            if (mx >= 530 .and. mx <= 560) cfg_num_items = min(MAX_GROUND_ITEMS, cfg_num_items + 1)
-        end if
-        ! Row 4: Distance min (y ~ 330)
-        if (my >= 325 .and. my <= 355) then
+        ! Row 3: Distance min (y=310)
+        if (my >= 297 .and. my <= 323) then
             if (mx >= 440 .and. mx <= 470) cfg_min_dist = max(1,  cfg_min_dist - 1)
             if (mx >= 530 .and. mx <= 560) cfg_min_dist = min(99, cfg_min_dist + 1)
+        end if
+        ! Row 4: Nb Dash (y=336)
+        total_items = sum(cfg_item_counts)
+        if (my >= 323 .and. my <= 349) then
+            if (mx >= 440 .and. mx <= 470) cfg_item_counts(ITEM_DASH) = max(0, cfg_item_counts(ITEM_DASH) - 1)
+            if (mx >= 530 .and. mx <= 560 .and. total_items < MAX_GROUND_ITEMS) &
+                cfg_item_counts(ITEM_DASH) = cfg_item_counts(ITEM_DASH) + 1
+        end if
+        ! Row 5: Nb Vision (y=362)
+        total_items = sum(cfg_item_counts)
+        if (my >= 349 .and. my <= 375) then
+            if (mx >= 440 .and. mx <= 470) cfg_item_counts(ITEM_VISION) = max(0, cfg_item_counts(ITEM_VISION) - 1)
+            if (mx >= 530 .and. mx <= 560 .and. total_items < MAX_GROUND_ITEMS) &
+                cfg_item_counts(ITEM_VISION) = cfg_item_counts(ITEM_VISION) + 1
+        end if
+        ! Row 6: Nb Lumiere (y=388)
+        total_items = sum(cfg_item_counts)
+        if (my >= 375 .and. my <= 401) then
+            if (mx >= 440 .and. mx <= 470) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
+            if (mx >= 530 .and. mx <= 560 .and. total_items < MAX_GROUND_ITEMS) &
+                cfg_item_counts(ITEM_ILLUMINATE) = cfg_item_counts(ITEM_ILLUMINATE) + 1
+        end if
+        ! Row 7: Nb Vitesse (y=414)
+        total_items = sum(cfg_item_counts)
+        if (my >= 401 .and. my <= 427) then
+            if (mx >= 440 .and. mx <= 470) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
+            if (mx >= 530 .and. mx <= 560 .and. total_items < MAX_GROUND_ITEMS) &
+                cfg_item_counts(ITEM_SPEED) = cfg_item_counts(ITEM_SPEED) + 1
+        end if
+        ! Row 8: Actions/tour cacheur (y=440)
+        if (my >= 427 .and. my <= 453) then
+            if (mx >= 440 .and. mx <= 470) cfg_speed_h = max(1, cfg_speed_h - 1)
+            if (mx >= 530 .and. mx <= 560) cfg_speed_h = min(5, cfg_speed_h + 1)
+        end if
+        ! Row 9: Actions/tour chercheur (y=466)
+        if (my >= 453 .and. my <= 479) then
+            if (mx >= 440 .and. mx <= 470) cfg_speed_s = max(1, cfg_speed_s - 1)
+            if (mx >= 530 .and. mx <= 560) cfg_speed_s = min(5, cfg_speed_s + 1)
         end if
     end subroutine
 
@@ -712,7 +755,8 @@ contains
         if (mod(cfg_maze_w, 2) == 0) cfg_maze_w = cfg_maze_w + 1
         if (mod(cfg_maze_h, 2) == 0) cfg_maze_h = cfg_maze_h + 1
 
-        call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_num_items, cfg_min_dist)
+        call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_item_counts, cfg_min_dist, &
+                      cfg_speed_h, cfg_speed_s)
         call send_game_init()
 
         game_ready   = .true.
@@ -734,7 +778,8 @@ contains
         if (mod(cfg_maze_w, 2) == 0) cfg_maze_w = cfg_maze_w + 1
         if (mod(cfg_maze_h, 2) == 0) cfg_maze_h = cfg_maze_h + 1
 
-        call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_num_items, cfg_min_dist)
+        call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_item_counts, cfg_min_dist, &
+                      cfg_speed_h, cfg_speed_s)
         print *, '[HOST] game_init done, maze=', gs%maze%w, 'x', gs%maze%h, &
                  ' items=', gs%num_items
         call send_game_init()
@@ -751,10 +796,12 @@ contains
         integer(c_int) :: st
 
         k = 0
-        ! Header: maze_w, maze_h, num_items
+        ! Header: maze_w, maze_h, num_items, speed_h, speed_s
         k = k+1; buf(k) = int(gs%maze%w, c_int8_t)
         k = k+1; buf(k) = int(gs%maze%h, c_int8_t)
         k = k+1; buf(k) = int(gs%num_items, c_int8_t)
+        k = k+1; buf(k) = int(gs%hider%speed, c_int8_t)
+        k = k+1; buf(k) = int(gs%seeker%speed, c_int8_t)
 
         ! Maze cells (row-major)
         do iy = 1, gs%maze%h
@@ -784,7 +831,7 @@ contains
     subroutine try_recv_game_init()
         integer(c_int8_t), target :: tmp(1024)
         integer(c_int) :: got
-        integer :: k, mw, mh, ni, ix, iy, i, needed
+        integer :: k, mw, mh, ni, ix, iy, i, needed, sp_h, sp_s
 
         ! Try to receive more data into persistent buffer
         call net_try_recv_bytes(game_fd, tmp, int(1024, c_int), got)
@@ -795,12 +842,14 @@ contains
             print *, '[CLIENT] recv init: got', got, 'bytes, total=', recv_init_pos
         end if
 
-        if (recv_init_pos < 3) return   ! not enough data yet
+        if (recv_init_pos < 5) return   ! not enough data yet
 
-        mw = int(recv_init_buf(1))
-        mh = int(recv_init_buf(2))
-        ni = int(recv_init_buf(3))
-        needed = 3 + mw*mh + ni*3 + 4
+        mw   = int(recv_init_buf(1))
+        mh   = int(recv_init_buf(2))
+        ni   = int(recv_init_buf(3))
+        sp_h = int(recv_init_buf(4))
+        sp_s = int(recv_init_buf(5))
+        needed = 5 + mw*mh + ni*3 + 4
 
         if (recv_init_pos < needed) then
             print *, '[CLIENT] need', needed, 'bytes, have', recv_init_pos
@@ -809,7 +858,7 @@ contains
         print *, '[CLIENT] full init received:', needed, 'bytes'
 
         ! Parse maze
-        k = 3
+        k = 5
         gs%maze%w = mw
         gs%maze%h = mh
         gs%maze%cells = 0
@@ -838,9 +887,13 @@ contains
         gs%hider%vision_radius  = 2
         gs%hider%num_items      = 0
         gs%hider%inventory      = ITEM_NONE
+        gs%hider%speed          = sp_h
+        gs%hider%actions_left   = sp_h
         gs%seeker%vision_radius = 1
         gs%seeker%num_items     = 0
         gs%seeker%inventory     = ITEM_NONE
+        gs%seeker%speed         = sp_s
+        gs%seeker%actions_left  = sp_s
 
         gs%h_visible       = .false.
         gs%s_visible       = .false.
@@ -986,21 +1039,37 @@ contains
                 uint8(80), uint8(80), uint8(100), uint8(255))
         rc = sdl_render_draw_line(main_renderer, 180, 243, 620, 243)
 
-        py = 260
-        call draw_param_row(py, 'Largeur labyrinthe', cfg_maze_w);  py = py + 30
-        call draw_param_row(py, 'Hauteur labyrinthe', cfg_maze_h);  py = py + 30
-        call draw_param_row(py, 'Nombre d''objets',   cfg_num_items); py = py + 30
-        call draw_param_row(py, 'Distance min spawn', cfg_min_dist); py = py + 30
+        py = 258
+        call draw_param_row(py, 'Largeur labyrinthe',   cfg_maze_w);            py = py + 26
+        call draw_param_row(py, 'Hauteur labyrinthe',   cfg_maze_h);            py = py + 26
+        call draw_param_row(py, 'Distance min spawn',   cfg_min_dist);          py = py + 26
 
-        ! Hint
-        call draw_text_centered('Espace = passer son tour en jeu', &
-                                sml_font, COL_DIM, SCREEN_W/2, py + 15)
+        ! Item separator
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(60), uint8(60), uint8(80), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 200, py - 5, 580, py - 5)
+
+        call draw_param_row(py, 'Nb Dash',              cfg_item_counts(ITEM_DASH));       py = py + 26
+        call draw_param_row(py, 'Nb Vision',            cfg_item_counts(ITEM_VISION));     py = py + 26
+        call draw_param_row(py, 'Nb Lumiere',           cfg_item_counts(ITEM_ILLUMINATE)); py = py + 26
+        call draw_param_row(py, 'Nb Vitesse',           cfg_item_counts(ITEM_SPEED));      py = py + 26
+
+        ! Speed separator
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(60), uint8(60), uint8(80), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 200, py - 5, 580, py - 5)
+
+        call draw_param_row(py, 'Actions/tour cacheur',   cfg_speed_h);   py = py + 26
+        call draw_param_row(py, 'Actions/tour chercheur', cfg_speed_s);   py = py + 26
+
+        ! --- Tooltip on hover ---
+        call render_host_tooltip(py)
 
         ! Buttons
         if (client_connected) then
-            call draw_button(250, 450, 300, 60, 'Lancer la partie', COL_GREEN)
+            call draw_button(250, py + 10, 300, 50, 'Lancer la partie', COL_GREEN)
         end if
-        call draw_button(300, 540, 200, 50, 'Retour', COL_RED)
+        call draw_button(300, py + 70, 200, 40, 'Retour', COL_RED)
     end subroutine
 
     subroutine draw_param_row(y, label, val)
@@ -1034,6 +1103,65 @@ contains
                 COL_GREEN%r, COL_GREEN%g, COL_GREEN%b, uint8(255))
         rc = sdl_render_draw_rect(main_renderer, br)
         call draw_text_centered('+', sml_font, COL_GREEN, 545, y - SML_FONT_SZ/2)
+    end subroutine
+
+    ! Tooltip for host parameters: show description when hovering over a row
+    subroutine render_host_tooltip(py_end)
+        integer, intent(in) :: py_end
+        integer(kind=c_int) :: mx_c, my_c
+        integer(kind=c_uint32_t) :: btn_state
+        integer :: mx, my, row
+        character(len=64) :: tip
+        type(sdl_rect) :: bgr
+        type(sdl_surface), pointer :: surf
+        type(c_ptr) :: tex
+        integer :: tw
+
+        btn_state = sdl_get_mouse_state(mx_c, my_c)
+        mx = int(mx_c); my = int(my_c)
+
+        ! Only show tooltip when mouse is over the label area (x=180..430)
+        if (mx < 180 .or. mx > 430) return
+        if (my < 245 .or. my > 479) return
+
+        ! Determine which row (0-indexed)
+        row = (my - 245) / 26
+        tip = ' '
+        select case (row)
+            case (0);  tip = 'Nombre de colonnes (impair recommande)'
+            case (1);  tip = 'Nombre de lignes (impair recommande)'
+            case (2);  tip = 'Distance min en cases entre departs'
+            case (3);  tip = 'Fonce en ligne droite, revele le chemin'
+            case (4);  tip = 'Rayon de vision +1 a +3 (aleatoire, permanent)'
+            case (5);  tip = 'Revele la carte entiere pour ce tour'
+            case (6);  tip = '+1 action par tour (permanent)'
+            case (7);  tip = 'Nombre d''actions par tour pour le cacheur'
+            case (8);  tip = 'Nombre d''actions par tour pour le chercheur'
+        end select
+        if (len_trim(tip) == 0) return
+
+        ! Draw tooltip background + text near mouse
+        surf => ttf_render_text_solid(sml_font, trim(tip)//c_null_char, COL_WHITE)
+        if (.not. associated(surf)) return
+        tw = surf%w
+        bgr = sdl_rect(mx + 12, my - 24, tw + 10, 22)
+        ! Keep tooltip on screen
+        if (bgr%x + bgr%w > SCREEN_W) bgr%x = SCREEN_W - bgr%w - 4
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(20), uint8(20), uint8(30), uint8(240))
+        rc = sdl_render_fill_rect(main_renderer, bgr)
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(120), uint8(120), uint8(140), uint8(255))
+        rc = sdl_render_draw_rect(main_renderer, bgr)
+        tex = sdl_create_texture_from_surface(main_renderer, surf)
+        block
+            type(sdl_rect) :: sr, dr
+            sr = sdl_rect(0, 0, surf%w, surf%h)
+            dr = sdl_rect(bgr%x + 5, bgr%y + 2, surf%w, surf%h)
+            rc = sdl_render_copy(main_renderer, tex, sr, dr)
+        end block
+        call sdl_destroy_texture(tex)
+        call sdl_free_surface(surf)
     end subroutine
 
     ! --- Join ---
@@ -1246,6 +1374,10 @@ contains
                 rc = sdl_set_render_draw_color(main_renderer, &
                         uint8(255), uint8(220), uint8(50), uint8(200))
                 letter = 'L'
+            case (ITEM_SPEED)
+                rc = sdl_set_render_draw_color(main_renderer, &
+                        uint8(50), uint8(220), uint8(130), uint8(200))
+                letter = 'S'
             case default
                 return
         end select
@@ -1440,9 +1572,17 @@ contains
         if (am_host) then
             write(label, '(A,I0)') 'Vision: ', gs%hider%vision_radius
             call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
+            if (gs%hider%speed > 1) then
+                write(label, '(A,I0)') 'Vitesse: ', gs%hider%speed
+                call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 5)
+            end if
         else
             write(label, '(A,I0)') 'Vision: ', gs%seeker%vision_radius
             call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
+            if (gs%seeker%speed > 1) then
+                write(label, '(A,I0)') 'Vitesse: ', gs%seeker%speed
+                call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 5)
+            end if
         end if
 
         ! Turn number
@@ -1466,6 +1606,7 @@ contains
             case (ITEM_DASH);       col = COL_ORANGE
             case (ITEM_VISION);     col = COL_PURPLE
             case (ITEM_ILLUMINATE); col = COL_YELLOW
+            case (ITEM_SPEED);      col = COL_GREEN
             case default;           col = COL_GRAY
         end select
     end subroutine
@@ -1474,11 +1615,25 @@ contains
     ! Status overlay (turn indicator only — game over handled separately)
     ! -----------------------------------------------------------------
     subroutine render_status()
+        character(len=64) :: status_text
+        integer :: spd, act
+
         if (game_ended) return   ! handled by render_endgame_overlay
 
         ! Turn indicator at top of screen
         if (is_my_turn()) then
-            call draw_text_centered('VOTRE TOUR', sml_font, COL_GREEN, &
+            if (am_host) then
+                spd = gs%hider%speed; act = gs%hider%actions_left
+            else
+                spd = gs%seeker%speed; act = gs%seeker%actions_left
+            end if
+            if (spd > 1) then
+                write(status_text, '(A,I0,A,I0,A)') &
+                    'VOTRE TOUR (', act, '/', spd, ' actions)'
+            else
+                status_text = 'VOTRE TOUR'
+            end if
+            call draw_text_centered(trim(status_text), sml_font, COL_GREEN, &
                                     SCREEN_W/2, 2)
         else
             call draw_text_centered('Tour de l''adversaire...', sml_font, &

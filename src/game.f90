@@ -23,21 +23,22 @@ module game_mod
 
     ! --- Public API ---
     public :: game_state, player_type, ground_item_type
-    public :: ITEM_NONE, ITEM_DASH, ITEM_VISION, ITEM_ILLUMINATE
+    public :: ITEM_NONE, ITEM_DASH, ITEM_VISION, ITEM_ILLUMINATE, ITEM_SPEED
     public :: NUM_ITEM_TYPES, MAX_INVENTORY, MAX_GROUND_ITEMS
     public :: ROLE_HIDER, ROLE_SEEKER
     public :: INPUT_MOVE, INPUT_ITEM_DIR, INPUT_WAIT
     public :: game_init, game_do_move, game_do_use_item
     public :: game_compute_visibility, game_end_turn
     public :: game_check_win, game_item_needs_direction
-    public :: game_item_name, game_do_pass
+    public :: game_item_name, game_item_description, game_do_pass
 
     ! --- Item types ---
     integer, parameter :: ITEM_NONE       = 0
     integer, parameter :: ITEM_DASH       = 1
     integer, parameter :: ITEM_VISION     = 2
     integer, parameter :: ITEM_ILLUMINATE = 3
-    integer, parameter :: NUM_ITEM_TYPES  = 3
+    integer, parameter :: ITEM_SPEED      = 4
+    integer, parameter :: NUM_ITEM_TYPES  = 4
 
     ! --- Player roles ---
     integer, parameter :: ROLE_HIDER  = 0
@@ -66,6 +67,8 @@ module game_mod
         integer :: inventory(MAX_INVENTORY) = ITEM_NONE
         integer :: num_items    = 0
         integer :: vision_radius = 1
+        integer :: speed        = 1   ! actions per turn
+        integer :: actions_left = 1   ! remaining actions this turn
     end type
 
     type :: game_state
@@ -108,11 +111,12 @@ contains
     ! Initialize a new game: generate maze, place items and players.
     ! min_dist: minimum BFS distance between hider and seeker spawns.
     ! =========================================================================
-    subroutine game_init(gs, maze_w, maze_h, num_obj, min_dist)
+    subroutine game_init(gs, maze_w, maze_h, item_counts, min_dist, speed_h, speed_s)
         type(game_state), intent(out) :: gs
-        integer, intent(in) :: maze_w, maze_h, num_obj, min_dist
+        integer, intent(in) :: maze_w, maze_h, min_dist, speed_h, speed_s
+        integer, intent(in) :: item_counts(NUM_ITEM_TYPES)
 
-        integer :: i, x, y, itype, attempts, d
+        integer :: i, j, x, y, itype, attempts, d
         real    :: rval
         logical :: occupied(MAZE_MAX_W, MAZE_MAX_H)
         integer :: hx, hy, sx, sy
@@ -157,45 +161,46 @@ contains
         gs%hider%vision_radius = 2   ! limited vision for items/players
         gs%hider%num_items = 0
         gs%hider%inventory = ITEM_NONE
+        gs%hider%speed = speed_h
+        gs%hider%actions_left = speed_h
 
         gs%seeker%x = sx
         gs%seeker%y = sy
         gs%seeker%vision_radius = 1
         gs%seeker%num_items = 0
         gs%seeker%inventory = ITEM_NONE
+        gs%seeker%speed = speed_s
+        gs%seeker%actions_left = speed_s
 
         ! Track occupied cells (players + items)
         occupied = .false.
         occupied(gs%hider%x, gs%hider%y) = .true.
         occupied(gs%seeker%x, gs%seeker%y) = .true.
 
-        ! Randomly place items on empty cells
+        ! Place items per type according to item_counts
         gs%num_items = 0
-        do i = 1, num_obj
-            if (gs%num_items >= MAX_GROUND_ITEMS) exit
+        do itype = 1, NUM_ITEM_TYPES
+            do j = 1, item_counts(itype)
+                if (gs%num_items >= MAX_GROUND_ITEMS) exit
 
-            ! Find a random unoccupied cell
-            do
-                call random_number(rval)
-                x = 1 + int(rval * maze_w)
-                if (x > maze_w) x = maze_w
-                call random_number(rval)
-                y = 1 + int(rval * maze_h)
-                if (y > maze_h) y = maze_h
-                if (.not. occupied(x, y)) exit
+                ! Find a random unoccupied cell
+                do
+                    call random_number(rval)
+                    x = 1 + int(rval * maze_w)
+                    if (x > maze_w) x = maze_w
+                    call random_number(rval)
+                    y = 1 + int(rval * maze_h)
+                    if (y > maze_h) y = maze_h
+                    if (.not. occupied(x, y)) exit
+                end do
+
+                gs%num_items = gs%num_items + 1
+                gs%items(gs%num_items)%x     = x
+                gs%items(gs%num_items)%y     = y
+                gs%items(gs%num_items)%itype = itype
+                gs%items(gs%num_items)%active = .true.
+                occupied(x, y) = .true.
             end do
-
-            ! Choose a random item type
-            call random_number(rval)
-            itype = 1 + int(rval * NUM_ITEM_TYPES)
-            if (itype > NUM_ITEM_TYPES) itype = NUM_ITEM_TYPES
-
-            gs%num_items = gs%num_items + 1
-            gs%items(gs%num_items)%x     = x
-            gs%items(gs%num_items)%y     = y
-            gs%items(gs%num_items)%itype = itype
-            gs%items(gs%num_items)%active = .true.
-            occupied(x, y) = .true.
         end do
 
         ! Initialize per-player visibility and memory
@@ -307,6 +312,13 @@ contains
                     gs%s_illuminate = .true.
                 end if
 
+            case (ITEM_SPEED)
+                if (role == ROLE_HIDER) then
+                    gs%hider%speed = gs%hider%speed + 1
+                else
+                    gs%seeker%speed = gs%seeker%speed + 1
+                end if
+
         end select
 
         ! Remove item from inventory
@@ -339,7 +351,28 @@ contains
             case (ITEM_DASH);       name = 'Dash'
             case (ITEM_VISION);     name = 'Vision'
             case (ITEM_ILLUMINATE); name = 'Lumiere'
+            case (ITEM_SPEED);      name = 'Vitesse'
             case default;           name = '???'
+        end select
+    end function
+
+    ! =========================================================================
+    ! Get a detailed description for an item type (tooltip).
+    ! =========================================================================
+    function game_item_description(itype) result(desc)
+        integer, intent(in) :: itype
+        character(len=64) :: desc
+        select case (itype)
+            case (ITEM_DASH)
+                desc = 'Fonce en ligne droite, revele le chemin'
+            case (ITEM_VISION)
+                desc = 'Rayon de vision +1 a +3 (aleatoire, permanent)'
+            case (ITEM_ILLUMINATE)
+                desc = 'Revele la carte entiere pour ce tour'
+            case (ITEM_SPEED)
+                desc = '+1 action par tour (permanent)'
+            case default
+                desc = ' '
         end select
     end function
 
@@ -424,7 +457,25 @@ contains
     ! =========================================================================
     subroutine game_end_turn(gs)
         type(game_state), intent(inout) :: gs
+        integer :: remaining
 
+        ! Decrement actions remaining for current player
+        if (gs%turn == 0) then
+            gs%hider%actions_left = gs%hider%actions_left - 1
+            remaining = gs%hider%actions_left
+        else
+            gs%seeker%actions_left = gs%seeker%actions_left - 1
+            remaining = gs%seeker%actions_left
+        end if
+
+        if (remaining > 0) then
+            ! Player still has actions this turn
+            gs%input_state   = INPUT_MOVE
+            gs%selected_slot = 0
+            return
+        end if
+
+        ! No more actions: end the real turn
         ! Reset illuminate at end of turn
         if (gs%h_illuminate .or. gs%s_illuminate) then
             gs%h_illuminate = .false.
@@ -432,12 +483,14 @@ contains
             call game_compute_visibility(gs)
         end if
 
-        ! Switch turn
+        ! Switch turn and give next player their actions
         if (gs%turn == 0) then
             gs%turn = 1
+            gs%seeker%actions_left = gs%seeker%speed
         else
             gs%turn = 0
             gs%turn_number = gs%turn_number + 1
+            gs%hider%actions_left = gs%hider%speed
         end if
 
         gs%input_state   = INPUT_MOVE
