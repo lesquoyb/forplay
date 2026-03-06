@@ -57,14 +57,14 @@ jobs:
         if: matrix.name == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gfortran libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core
+          sudo apt-get install -y gfortran libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core imagemagick
 
       # ================================================================
       # Install dependencies — macOS
       # ================================================================
       - name: Install dependencies (macOS)
         if: matrix.name == 'macos'
-        run: brew install gcc sdl2 sdl2_ttf
+        run: brew install gcc sdl2 sdl2_ttf imagemagick
 
       # ================================================================
       # Install fpm
@@ -96,12 +96,44 @@ jobs:
         run: sed -i '' 's/^link = .*/link = ["SDL2", "SDL2_ttf"]/' fpm.toml
 
       # ================================================================
+      # Generate icon
+      # ================================================================
+      - name: Generate icon (Windows)
+        if: matrix.name == 'windows'
+        shell: msys2 {0}
+        run: |
+          pacman -S --noconfirm mingw-w64-x86_64-imagemagick
+          magick resources/icon.png -define icon:auto-resize=256,128,64,48,32,16 resources/forplay.ico
+          windres forplay.rc -o forplay_res.o
+
+      - name: Generate icon (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          for size in 16 32 48 64 128 256 512; do
+            convert resources/icon.png -resize ${size}x${size} resources/icon_${size}.png
+          done
+
+      - name: Generate icon (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          mkdir -p forplay.iconset
+          for size in 16 32 64 128 256 512; do
+            magick resources/icon.png -resize ${size}x${size} forplay.iconset/icon_${size}x${size}.png
+            double=$((size * 2))
+            if [ $double -le 1024 ]; then
+              magick resources/icon.png -resize ${double}x${double} forplay.iconset/icon_${size}x${size}@2x.png
+            fi
+          done
+          magick resources/icon.png -resize 1024x1024 forplay.iconset/icon_512x512@2x.png
+          iconutil -c icns forplay.iconset -o resources/forplay.icns
+
+      # ================================================================
       # Build
       # ================================================================
       - name: Build (Windows)
         if: matrix.name == 'windows'
         shell: msys2 {0}
-        run: fpm build --profile release --flag "-D_WIN32"
+        run: fpm build --profile release --flag "-D_WIN32" --link-flag "forplay_res.o"
 
       - name: Build (Linux)
         if: matrix.name == 'linux'
@@ -124,6 +156,9 @@ jobs:
           mkdir -p dist
           # Find and copy the built executable
           find build -name "forplay.exe" -type f -exec cp {} dist/ \;
+          # Bundle resources (font)
+          mkdir -p dist/resources
+          cp resources/DejaVuSansMono.ttf dist/resources/
           # Bundle required DLLs from MSYS2
           for dll in SDL2.dll SDL2_ttf.dll \
             libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll \
@@ -141,13 +176,53 @@ jobs:
         run: |
           mkdir -p dist
           find build -name "forplay" -type f -executable -exec cp {} dist/ \;
+          mkdir -p dist/resources
+          cp resources/DejaVuSansMono.ttf dist/resources/
+          cp resources/icon.png dist/forplay.png
+          # Create .desktop file
+          cat > dist/forplay.desktop << 'EOF'
+[Desktop Entry]
+Name=ForPlay
+Comment=Asymmetric multiplayer maze game
+Exec=forplay
+Icon=forplay
+Type=Application
+Categories=Game;
+EOF
           cd dist && tar czf "../${{ matrix.archive }}" . && cd ..
 
       - name: Package (macOS)
         if: matrix.name == 'macos'
         run: |
-          mkdir -p dist
-          find build -name "forplay" -type f -perm +111 -exec cp {} dist/ \;
+          # Create .app bundle
+          APP=dist/ForPlay.app/Contents
+          mkdir -p $APP/MacOS $APP/Resources
+          find build -name "forplay" -type f -perm +111 -exec cp {} $APP/MacOS/forplay \;
+          cp resources/forplay.icns $APP/Resources/
+          mkdir -p $APP/Resources/resources
+          cp resources/DejaVuSansMono.ttf $APP/Resources/resources/
+          cat > $APP/Info.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>forplay</string>
+  <key>CFBundleIconFile</key>
+  <string>forplay</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.forplay.game</string>
+  <key>CFBundleName</key>
+  <string>ForPlay</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>1.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+</dict>
+</plist>
+EOF
           cd dist && tar czf "../${{ matrix.archive }}" . && cd ..
 
       - name: Upload artifact

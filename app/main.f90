@@ -264,28 +264,35 @@ contains
     function try_load_font(sz) result(f)
         integer, intent(in) :: sz
         type(c_ptr) :: f
-        character(len=256) :: paths(15)
+        character(len=256) :: paths(20)
         integer :: i
+        ! Bundled font (works everywhere)
+        paths(1) = 'resources/DejaVuSansMono.ttf'
+        paths(2) = './resources/DejaVuSansMono.ttf'
         ! Windows fonts
-        paths(1) = 'C:/Windows/Fonts/consola.ttf'
-        paths(2) = 'C:/Windows/Fonts/arial.ttf'
-        paths(3) = 'C:/Windows/Fonts/segoeui.ttf'
-        paths(4) = 'C:/Windows/Fonts/cour.ttf'
-        paths(5) = 'C:/Windows/Fonts/lucon.ttf'
-        ! Linux fonts
-        paths(6) = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
-        paths(7) = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
-        paths(8) = '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf'
-        paths(9) = '/usr/share/fonts/truetype/freefont/FreeMono.ttf'
-        paths(10) = '/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf'
+        paths(3) = 'C:/Windows/Fonts/consola.ttf'
+        paths(4) = 'C:/Windows/Fonts/arial.ttf'
+        paths(5) = 'C:/Windows/Fonts/segoeui.ttf'
+        paths(6) = 'C:/Windows/Fonts/cour.ttf'
+        paths(7) = 'C:/Windows/Fonts/lucon.ttf'
+        ! Linux fonts (Debian/Ubuntu)
+        paths(8) = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
+        paths(9) = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+        paths(10) = '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf'
+        paths(11) = '/usr/share/fonts/truetype/freefont/FreeMono.ttf'
+        paths(12) = '/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf'
+        ! Linux fonts (Fedora/Arch/openSUSE)
+        paths(13) = '/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf'
+        paths(14) = '/usr/share/fonts/TTF/DejaVuSansMono.ttf'
+        paths(15) = '/usr/share/fonts/dejavu/DejaVuSansMono.ttf'
         ! macOS fonts
-        paths(11) = '/System/Library/Fonts/Supplemental/Courier New.ttf'
-        paths(12) = '/System/Library/Fonts/Helvetica.ttc'
-        paths(13) = '/System/Library/Fonts/SFNSMono.ttf'
-        paths(14) = '/Library/Fonts/Arial.ttf'
-        paths(15) = '/System/Library/Fonts/Supplemental/Arial.ttf'
+        paths(16) = '/System/Library/Fonts/Supplemental/Courier New.ttf'
+        paths(17) = '/System/Library/Fonts/Helvetica.ttc'
+        paths(18) = '/System/Library/Fonts/SFNSMono.ttf'
+        paths(19) = '/Library/Fonts/Arial.ttf'
+        paths(20) = '/System/Library/Fonts/Supplemental/Arial.ttf'
         f = c_null_ptr
-        do i = 1, 15
+        do i = 1, 20
             f = ttf_open_font(trim(paths(i)) // c_null_char, sz)
             if (c_associated(f)) return
         end do
