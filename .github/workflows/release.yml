@@ -158,8 +158,8 @@ jobs:
           mkdir -p dist
           # Find and copy the built executable
           find build -name "forplay.exe" -type f -exec cp {} dist/ \;
-          # Bundle resources (font)
-          mkdir -p dist/resources
+          # Bundle resources (fonts)
+          cp -r resources/fonts dist/resources/
           cp resources/DejaVuSansMono.ttf dist/resources/
           # Bundle required DLLs from MSYS2
           for dll in SDL2.dll SDL2_ttf.dll \
@@ -179,6 +179,7 @@ jobs:
           mkdir -p dist
           find build -name "forplay" -type f -executable -exec cp {} dist/ \;
           mkdir -p dist/resources
+          cp -r resources/fonts dist/resources/
           cp resources/DejaVuSansMono.ttf dist/resources/
           cp resources/icon.png dist/forplay.png
           cp resources/forplay.desktop dist/
@@ -193,6 +194,7 @@ jobs:
           find build -name "forplay" -type f -perm +111 -exec cp {} $APP/MacOS/forplay \;
           cp resources/forplay.icns $APP/Resources/
           mkdir -p $APP/Resources/resources
+          cp -r resources/fonts $APP/Resources/resources/
           cp resources/DejaVuSansMono.ttf $APP/Resources/resources/
           cp resources/Info.plist $APP/
           cd dist && tar czf "../${{ matrix.archive }}" . && cd ..

@@ -3,4 +3,4 @@
 	url = https://github.com/lesquoyb/fortran-socket.git
 [submodule "deps/fortran-sdl2"]
 	path = deps/fortran-sdl2
-	url = https://github.com/interkosmos/fortran-sdl2.git
+	url = https://github.com/lesquoyb/fortran-sdl2.git

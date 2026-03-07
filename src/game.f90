@@ -75,6 +75,10 @@ module game_mod
         type(maze_type)        :: maze
         type(player_type)      :: hider
         type(player_type)      :: seeker
+        ! Key: hider must reach this to win
+        integer :: key_x       = 0
+        integer :: key_y       = 0
+        logical :: key_active  = .true.
         ! Per-player visibility (current vision + memory)
         logical :: h_visible(MAZE_MAX_W, MAZE_MAX_H) = .false.
         logical :: s_visible(MAZE_MAX_W, MAZE_MAX_H) = .false.
@@ -182,6 +186,24 @@ contains
         occupied = .false.
         occupied(gs%hider%x, gs%hider%y) = .true.
         occupied(gs%seeker%x, gs%seeker%y) = .true.
+
+        ! Place the key at minimum distance from hider
+        attempts = 0
+        do
+            call random_number(rval); x = 1 + int(rval * maze_w)
+            if (x > maze_w) x = maze_w
+            call random_number(rval); y = 1 + int(rval * maze_h)
+            if (y > maze_h) y = maze_h
+            if (occupied(x, y)) cycle
+            d = maze_shortest_path(gs%maze, hx, hy, x, y)
+            if (d >= min_dist) exit
+            attempts = attempts + 1
+            if (attempts > 500) exit  ! fallback: place wherever
+        end do
+        gs%key_x = x
+        gs%key_y = y
+        gs%key_active = .true.
+        occupied(x, y) = .true.
 
         ! Place items per type according to item_counts
         gs%num_items = 0
@@ -517,9 +539,17 @@ contains
     ! =========================================================================
     subroutine game_check_win(gs)
         type(game_state), intent(inout) :: gs
+        ! Seeker catches hider
         if (gs%hider%x == gs%seeker%x .and. gs%hider%y == gs%seeker%y) then
             gs%game_over  = .true.
             gs%seeker_won = .true.
+        end if
+        ! Hider reaches the key
+        if (gs%key_active .and. &
+            gs%hider%x == gs%key_x .and. gs%hider%y == gs%key_y) then
+            gs%game_over   = .true.
+            gs%seeker_won  = .false.
+            gs%key_active  = .false.
         end if
     end subroutine
 

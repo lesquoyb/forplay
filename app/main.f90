@@ -21,14 +21,18 @@ program forplay
     ! --- Constants ---
     integer, parameter :: SCREEN_W      = 800
     integer, parameter :: SCREEN_H      = 600
+    integer, parameter :: TITLE_FONT_SZ = 48
     integer, parameter :: MAIN_FONT_SZ  = 24
-    integer, parameter :: SML_FONT_SZ   = 18
+    integer, parameter :: SML_FONT_SZ   = 14
     integer, parameter :: DEFAULT_PORT  = 12345
     integer, parameter :: HUD_H         = 90
     integer, parameter :: GAME_AREA_H   = SCREEN_H - HUD_H  ! 510
     integer, parameter :: DEFAULT_MAZE_W = 21
     integer, parameter :: DEFAULT_MAZE_H = 15
-    integer, parameter :: DEFAULT_ITEM_COUNT = 3
+    integer, parameter :: DEFAULT_ITEM_DASH_COUNT       = 3
+    integer, parameter :: DEFAULT_ITEM_VISION_COUNT     = 2
+    integer, parameter :: DEFAULT_ITEM_ILLUMINATE_COUNT = 2
+    integer, parameter :: DEFAULT_ITEM_SPEED_COUNT      = 1
     integer, parameter :: DEFAULT_MIN_DIST  = 15
     integer, parameter :: DEFAULT_SPEED_H   = 2
     integer, parameter :: DEFAULT_SPEED_S   = 1
@@ -50,8 +54,10 @@ program forplay
     ! SDL handles
     type(c_ptr) :: main_window   = c_null_ptr
     type(c_ptr) :: main_renderer = c_null_ptr
+    type(c_ptr) :: title_font    = c_null_ptr
     type(c_ptr) :: big_font      = c_null_ptr
     type(c_ptr) :: sml_font      = c_null_ptr
+    integer :: sml_font_h, big_font_h  ! actual rendered line heights
 
     ! Application state
     integer :: current_page
@@ -64,7 +70,6 @@ program forplay
     integer(c_int) :: client_fd  = -1
     integer(c_int) :: my_socket  = -1
     character(len=256) :: local_ip
-    character(len=256) :: public_ip
     character(len=256) :: client_ip
     character(len=256) :: error_message
     logical :: client_connected
@@ -143,9 +148,16 @@ program forplay
     main_renderer = sdl_create_renderer(main_window, -1, SDL_RENDERER_ACCELERATED)
     if (.not. c_associated(main_renderer)) stop 'Renderer creation failed'
 
-    big_font = try_load_font(MAIN_FONT_SZ)
-    sml_font = try_load_font(SML_FONT_SZ)
+    title_font = load_font('resources/fonts/pixel musketeer/Pixel Musketeer.otf', TITLE_FONT_SZ)
+    big_font   = load_font('resources/fonts/omega pixel biform/omega-pixel-biform.ttf', MAIN_FONT_SZ)
+    sml_font   = load_font('resources/fonts/omega pixel biform/omega-pixel-biform.ttf', SML_FONT_SZ)
+    ! Fallback to bundled DejaVu if custom fonts not found
+    if (.not. c_associated(title_font)) title_font = try_load_font(TITLE_FONT_SZ)
+    if (.not. c_associated(big_font))   big_font   = try_load_font(MAIN_FONT_SZ)
+    if (.not. c_associated(sml_font))   sml_font   = try_load_font(SML_FONT_SZ)
     if (.not. c_associated(big_font)) stop 'No font found'
+    sml_font_h = ttf_font_height(sml_font)
+    big_font_h = ttf_font_height(big_font)
 
     ! ---- Init state ----
     current_page      = PAGE_MENU
@@ -158,7 +170,6 @@ program forplay
     input_port        = '12345'
     active_field      = 0
     local_ip          = ' '
-    public_ip         = ' '
     client_ip         = ' '
     am_host           = .false.
     am_hider          = .false.
@@ -168,7 +179,10 @@ program forplay
     recv_init_pos     = 0
     cfg_maze_w        = DEFAULT_MAZE_W
     cfg_maze_h        = DEFAULT_MAZE_H
-    cfg_item_counts   = DEFAULT_ITEM_COUNT
+    cfg_item_counts(ITEM_DASH)          = DEFAULT_ITEM_DASH_COUNT
+    cfg_item_counts(ITEM_VISION)        = DEFAULT_ITEM_VISION_COUNT
+    cfg_item_counts(ITEM_ILLUMINATE)    = DEFAULT_ITEM_ILLUMINATE_COUNT
+    cfg_item_counts(ITEM_SPEED)         = DEFAULT_ITEM_SPEED_COUNT
     cfg_min_dist      = DEFAULT_MIN_DIST
     cfg_speed_h       = DEFAULT_SPEED_H
     cfg_speed_s       = DEFAULT_SPEED_S
@@ -225,6 +239,7 @@ program forplay
     if (client_fd >= 0)  call net_close(client_fd)
     if (my_socket >= 0)  call net_close(my_socket)
     call net_cleanup()
+    if (c_associated(title_font)) call ttf_close_font(title_font)
     if (c_associated(big_font)) call ttf_close_font(big_font)
     if (c_associated(sml_font)) call ttf_close_font(sml_font)
     call ttf_quit()
@@ -261,6 +276,25 @@ contains
     ! =====================================================================
     ! Font loading
     ! =====================================================================
+    pure function to_upper(str) result(res)
+        character(len=*), intent(in) :: str
+        character(len=len(str)) :: res
+        integer :: i, ic
+        res = str
+        do i = 1, len(str)
+            ic = iachar(str(i:i))
+            if (ic >= iachar('a') .and. ic <= iachar('z')) &
+                res(i:i) = achar(ic - 32)
+        end do
+    end function
+
+    function load_font(path, sz) result(f)
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: sz
+        type(c_ptr) :: f
+        f = ttf_open_font(trim(path) // c_null_char, sz)
+    end function
+
     function try_load_font(sz) result(f)
         integer, intent(in) :: sz
         type(c_ptr) :: f
@@ -341,10 +375,10 @@ contains
         integer :: py, total_items, ly, ry
 
         ! Compute button Y to match render_host
-        ! Left: General 4 rows at 210,236,262,288; Bonuses header+sep; 4 rows at 352,378,404,430
-        ! Right: Hider 3 rows at 210,236,262; Seeker header+sep; 3 rows at 326,352,378
-        ly = 456   ! left column final ly
-        ry = 404   ! right column final ry
+        ! Left: General 4 rows at 224,250,276,302; Bonuses header+sep; 4 rows at 374,400,426,452
+        ! Right: Hider 3 rows at 224,250,276; Seeker header+sep; 3 rows at 348,374,400
+        ly = 478   ! left column final ly
+        ry = 426   ! right column final ry
         py = max(ly, ry) + 10
 
         ! "Start game" button
@@ -360,83 +394,83 @@ contains
 
         ! ===== LEFT COLUMN (x_base=20): minus at 240, plus at 315 =====
         ! -- General block --
-        ! Row: Width (y=210)
-        if (my >= 197 .and. my <= 223) then
-            if (mx >= 240 .and. mx <= 268) cfg_maze_w = max(7, cfg_maze_w - 2)
-            if (mx >= 315 .and. mx <= 343) cfg_maze_w = min(MAZE_MAX_W, cfg_maze_w + 2)
+        ! Row: Width (y=224)
+        if (my >= 211 .and. my <= 237) then
+            if (mx >= 240 .and. mx <= 262) cfg_maze_w = max(7, cfg_maze_w - 2)
+            if (mx >= 315 .and. mx <= 337) cfg_maze_w = min(MAZE_MAX_W, cfg_maze_w + 2)
         end if
-        ! Row: Height (y=236)
-        if (my >= 223 .and. my <= 249) then
-            if (mx >= 240 .and. mx <= 268) cfg_maze_h = max(7, cfg_maze_h - 2)
-            if (mx >= 315 .and. mx <= 343) cfg_maze_h = min(MAZE_MAX_H, cfg_maze_h + 2)
+        ! Row: Height (y=250)
+        if (my >= 237 .and. my <= 263) then
+            if (mx >= 240 .and. mx <= 262) cfg_maze_h = max(7, cfg_maze_h - 2)
+            if (mx >= 315 .and. mx <= 337) cfg_maze_h = min(MAZE_MAX_H, cfg_maze_h + 2)
         end if
-        ! Row: Min dist (y=262)
-        if (my >= 249 .and. my <= 275) then
-            if (mx >= 240 .and. mx <= 268) cfg_min_dist = max(1, cfg_min_dist - 1)
-            if (mx >= 315 .and. mx <= 343) cfg_min_dist = min(99, cfg_min_dist + 1)
+        ! Row: Min dist (y=276)
+        if (my >= 263 .and. my <= 289) then
+            if (mx >= 240 .and. mx <= 262) cfg_min_dist = max(1, cfg_min_dist - 1)
+            if (mx >= 315 .and. mx <= 337) cfg_min_dist = min(99, cfg_min_dist + 1)
         end if
-        ! Row: Host hides toggle (y=288), toggle at x=240..320
-        if (my >= 275 .and. my <= 301) then
-            if (mx >= 240 .and. mx <= 320) cfg_host_hides = .not. cfg_host_hides
+        ! Row: Host hides toggle (y=302), toggle at x=240..300
+        if (my >= 289 .and. my <= 315) then
+            if (mx >= 240 .and. mx <= 300) cfg_host_hides = .not. cfg_host_hides
         end if
 
-        ! -- Bonuses block (rows shifted by +26 due to extra General row) --
-        ! Row: Nb Dash (y=352)
-        if (my >= 339 .and. my <= 365) then
-            if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_DASH) = max(0, cfg_item_counts(ITEM_DASH) - 1)
-            if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
+        ! -- Bonuses block --
+        ! Row: Nb Dash (y=374)
+        if (my >= 361 .and. my <= 387) then
+            if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_DASH) = max(0, cfg_item_counts(ITEM_DASH) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_DASH) = cfg_item_counts(ITEM_DASH) + 1
         end if
-        ! Row: Nb Vision (y=378)
-        if (my >= 365 .and. my <= 391) then
-            if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_VISION) = max(0, cfg_item_counts(ITEM_VISION) - 1)
-            if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
+        ! Row: Nb Vision (y=400)
+        if (my >= 387 .and. my <= 413) then
+            if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_VISION) = max(0, cfg_item_counts(ITEM_VISION) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_VISION) = cfg_item_counts(ITEM_VISION) + 1
         end if
-        ! Row: Nb Light (y=404)
-        if (my >= 391 .and. my <= 417) then
-            if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
-            if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
+        ! Row: Nb Light (y=426)
+        if (my >= 413 .and. my <= 439) then
+            if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_ILLUMINATE) = cfg_item_counts(ITEM_ILLUMINATE) + 1
         end if
-        ! Row: Nb Speed (y=430)
-        if (my >= 417 .and. my <= 443) then
-            if (mx >= 240 .and. mx <= 268) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
-            if (mx >= 315 .and. mx <= 343 .and. total_items < MAX_GROUND_ITEMS) &
+        ! Row: Nb Speed (y=452)
+        if (my >= 439 .and. my <= 465) then
+            if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_SPEED) = cfg_item_counts(ITEM_SPEED) + 1
         end if
 
         ! ===== RIGHT COLUMN (x_base=410): minus at 630, plus at 705 =====
         ! -- Hider block --
-        ! Row: Speed (y=210)
-        if (my >= 197 .and. my <= 223) then
-            if (mx >= 630 .and. mx <= 658) cfg_speed_h = max(1, cfg_speed_h - 1)
-            if (mx >= 705 .and. mx <= 733) cfg_speed_h = min(5, cfg_speed_h + 1)
+        ! Row: Speed (y=224)
+        if (my >= 211 .and. my <= 237) then
+            if (mx >= 630 .and. mx <= 652) cfg_speed_h = max(1, cfg_speed_h - 1)
+            if (mx >= 705 .and. mx <= 727) cfg_speed_h = min(5, cfg_speed_h + 1)
         end if
-        ! Row: Vision (y=236)
-        if (my >= 223 .and. my <= 249) then
-            if (mx >= 630 .and. mx <= 658) cfg_vision_h = max(1, cfg_vision_h - 1)
-            if (mx >= 705 .and. mx <= 733) cfg_vision_h = min(10, cfg_vision_h + 1)
+        ! Row: Vision (y=250)
+        if (my >= 237 .and. my <= 263) then
+            if (mx >= 630 .and. mx <= 652) cfg_vision_h = max(1, cfg_vision_h - 1)
+            if (mx >= 705 .and. mx <= 727) cfg_vision_h = min(10, cfg_vision_h + 1)
         end if
-        ! Row: Maze revealed toggle (y=262), toggle at x=630..710
-        if (my >= 249 .and. my <= 275) then
-            if (mx >= 630 .and. mx <= 710) cfg_reveal_h = .not. cfg_reveal_h
+        ! Row: Maze revealed toggle (y=276), toggle at x=630..690
+        if (my >= 263 .and. my <= 289) then
+            if (mx >= 630 .and. mx <= 690) cfg_reveal_h = .not. cfg_reveal_h
         end if
 
         ! -- Seeker block --
-        ! Row: Speed (y=326)
-        if (my >= 313 .and. my <= 339) then
-            if (mx >= 630 .and. mx <= 658) cfg_speed_s = max(1, cfg_speed_s - 1)
-            if (mx >= 705 .and. mx <= 733) cfg_speed_s = min(5, cfg_speed_s + 1)
+        ! Row: Speed (y=348)
+        if (my >= 335 .and. my <= 361) then
+            if (mx >= 630 .and. mx <= 652) cfg_speed_s = max(1, cfg_speed_s - 1)
+            if (mx >= 705 .and. mx <= 727) cfg_speed_s = min(5, cfg_speed_s + 1)
         end if
-        ! Row: Vision (y=352)
-        if (my >= 339 .and. my <= 365) then
-            if (mx >= 630 .and. mx <= 658) cfg_vision_s = max(1, cfg_vision_s - 1)
-            if (mx >= 705 .and. mx <= 733) cfg_vision_s = min(10, cfg_vision_s + 1)
+        ! Row: Vision (y=374)
+        if (my >= 361 .and. my <= 387) then
+            if (mx >= 630 .and. mx <= 652) cfg_vision_s = max(1, cfg_vision_s - 1)
+            if (mx >= 705 .and. mx <= 727) cfg_vision_s = min(10, cfg_vision_s + 1)
         end if
-        ! Row: Maze revealed toggle (y=378), toggle at x=630..710
-        if (my >= 365 .and. my <= 391) then
-            if (mx >= 630 .and. mx <= 710) cfg_reveal_s = .not. cfg_reveal_s
+        ! Row: Maze revealed toggle (y=400), toggle at x=630..690
+        if (my >= 387 .and. my <= 413) then
+            if (mx >= 630 .and. mx <= 690) cfg_reveal_s = .not. cfg_reveal_s
         end if
     end subroutine
 
@@ -663,7 +697,6 @@ contains
         call net_start_server(pv, server_fd, err)
         if (server_fd < 0) then; error_message = err; return; end if
         call net_get_local_ip(local_ip)
-        call net_get_public_ip(public_ip)
         client_connected  = .false.
         waiting_for_client = .true.
         client_ip         = ' '
@@ -932,6 +965,10 @@ contains
         k = k+1; buf(k) = int(gs%seeker%x, c_int8_t)
         k = k+1; buf(k) = int(gs%seeker%y, c_int8_t)
 
+        ! Key position
+        k = k+1; buf(k) = int(gs%key_x, c_int8_t)
+        k = k+1; buf(k) = int(gs%key_y, c_int8_t)
+
         call net_send_bytes(game_fd, buf, int(k, c_int), st)
         print *, '[HOST] send_game_init: sent', k, 'bytes, status=', st
     end subroutine
@@ -965,7 +1002,7 @@ contains
         rev_h = (recv_init_buf(8) /= 0)
         rev_s = (recv_init_buf(9) /= 0)
         host_hides = (recv_init_buf(10) /= 0)
-        needed = 10 + mw*mh + ni*3 + 4
+        needed = 10 + mw*mh + ni*3 + 4 + 2   ! +2 for key position
 
         if (recv_init_pos < needed) then
             print *, '[CLIENT] need', needed, 'bytes, have', recv_init_pos
@@ -998,6 +1035,11 @@ contains
         k = k+1; gs%hider%y  = int(recv_init_buf(k))
         k = k+1; gs%seeker%x = int(recv_init_buf(k))
         k = k+1; gs%seeker%y = int(recv_init_buf(k))
+
+        ! Parse key position
+        k = k+1; gs%key_x = int(recv_init_buf(k))
+        k = k+1; gs%key_y = int(recv_init_buf(k))
+        gs%key_active = .true.
 
         ! Set up seeker/hider defaults
         gs%hider%vision_radius  = vis_h
@@ -1121,7 +1163,7 @@ contains
 
     ! --- Menu ---
     subroutine render_menu()
-        call draw_text_centered('ForPlay', big_font, COL_CYAN, SCREEN_W/2, 100)
+        call draw_text_centered('ForPlay', title_font, COL_CYAN, SCREEN_W/2, 80)
         call draw_text_centered('Choose an option', sml_font, COL_GRAY, &
                                 SCREEN_W/2, 170)
         call draw_button(250, 250, 300, 60, 'Host a game', COL_GREEN)
@@ -1138,11 +1180,8 @@ contains
         call draw_text_centered('Hosting', big_font, COL_CYAN, SCREEN_W/2, 20)
         write(info,'(A,A)') 'Local IP: ', trim(local_ip)
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 64)
-        write(info,'(A,A)') 'Public IP: ', trim(public_ip)
-        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 90)
-        call draw_text_at(sml_font, '(requires port forwarding)', COL_DIM, 490, 90)
         write(info,'(A,I0)') 'Port: ', DEFAULT_PORT
-        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 116)
+        call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 90)
 
         if (client_connected) then
             write(info,'(A,A)') 'Client: ', trim(client_ip)
@@ -1159,7 +1198,7 @@ contains
                 uint8(80), uint8(80), uint8(100), uint8(255))
         rc = sdl_render_draw_line(main_renderer, 20, 200, 390, 200)
 
-        ly = 210
+        ly = 224
         call draw_param_row_at(20, ly, 'Width',     cfg_maze_w);  ly = ly + 26
         call draw_param_row_at(20, ly, 'Height',    cfg_maze_h);  ly = ly + 26
         call draw_param_row_at(20, ly, 'Min dist.', cfg_min_dist); ly = ly + 26
@@ -1172,7 +1211,7 @@ contains
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(80), uint8(80), uint8(100), uint8(255))
         rc = sdl_render_draw_line(main_renderer, 20, ly, 390, ly)
-        ly = ly + 10
+        ly = ly + 18
         call draw_param_row_at(20, ly, 'Nb Dash',   cfg_item_counts(ITEM_DASH));    ly = ly + 26
         call draw_param_row_at(20, ly, 'Nb Vision', cfg_item_counts(ITEM_VISION));  ly = ly + 26
         call draw_param_row_at(20, ly, 'Nb Light',  cfg_item_counts(ITEM_ILLUMINATE)); ly = ly + 26
@@ -1185,7 +1224,7 @@ contains
                 uint8(80), uint8(80), uint8(100), uint8(255))
         rc = sdl_render_draw_line(main_renderer, 410, 200, 770, 200)
 
-        ry = 210
+        ry = 224
         call draw_param_row_at(410, ry, 'Speed',  cfg_speed_h);  ry = ry + 26
         call draw_param_row_at(410, ry, 'Vision', cfg_vision_h); ry = ry + 26
         call draw_toggle_row_at(410, ry, 'Maze revealed', cfg_reveal_h); ry = ry + 26
@@ -1197,7 +1236,7 @@ contains
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(80), uint8(80), uint8(100), uint8(255))
         rc = sdl_render_draw_line(main_renderer, 410, ry, 770, ry)
-        ry = ry + 10
+        ry = ry + 18
         call draw_param_row_at(410, ry, 'Speed',  cfg_speed_s);  ry = ry + 26
         call draw_param_row_at(410, ry, 'Vision', cfg_vision_s); ry = ry + 26
         call draw_toggle_row_at(410, ry, 'Maze revealed', cfg_reveal_s); ry = ry + 26
@@ -1226,31 +1265,31 @@ contains
         vx = x_base + 265
         px = x_base + 295
 
-        call draw_text_at(sml_font, label, COL_WHITE, lx, y - SML_FONT_SZ/2)
+        call draw_text_at(sml_font, label, COL_WHITE, lx, y - sml_font_h/2)
 
         ! Minus button
-        br = sdl_rect(mx, y - 12, 28, 24)
+        br = sdl_rect(mx, y - 9, 22, 18)
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(60), uint8(40), uint8(40), uint8(255))
         rc = sdl_render_fill_rect(main_renderer, br)
         rc = sdl_set_render_draw_color(main_renderer, &
                 COL_RED%r, COL_RED%g, COL_RED%b, uint8(255))
         rc = sdl_render_draw_rect(main_renderer, br)
-        call draw_text_centered('-', sml_font, COL_RED, mx + 14, y - SML_FONT_SZ/2)
+        call draw_text_centered('-', sml_font, COL_RED, mx + 11, y - sml_font_h/2)
 
         ! Value
         write(vs, '(I0)') val
-        call draw_text_centered(trim(vs), sml_font, COL_YELLOW, vx, y - SML_FONT_SZ/2)
+        call draw_text_centered(trim(vs), sml_font, COL_YELLOW, vx, y - sml_font_h/2)
 
         ! Plus button
-        br = sdl_rect(px, y - 12, 28, 24)
+        br = sdl_rect(px, y - 9, 22, 18)
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(40), uint8(60), uint8(40), uint8(255))
         rc = sdl_render_fill_rect(main_renderer, br)
         rc = sdl_set_render_draw_color(main_renderer, &
                 COL_GREEN%r, COL_GREEN%g, COL_GREEN%b, uint8(255))
         rc = sdl_render_draw_rect(main_renderer, br)
-        call draw_text_centered('+', sml_font, COL_GREEN, px + 14, y - SML_FONT_SZ/2)
+        call draw_text_centered('+', sml_font, COL_GREEN, px + 11, y - sml_font_h/2)
     end subroutine
 
     subroutine draw_toggle_row_at(x_base, y, label, val)
@@ -1263,10 +1302,10 @@ contains
         lx = x_base
         bx = x_base + 220
 
-        call draw_text_at(sml_font, label, COL_WHITE, lx, y - SML_FONT_SZ/2)
+        call draw_text_at(sml_font, label, COL_WHITE, lx, y - sml_font_h/2)
 
-        ! Toggle button (80 x 24)
-        br = sdl_rect(bx, y - 12, 80, 24)
+        ! Toggle button (60 x 18)
+        br = sdl_rect(bx, y - 9, 60, 18)
         if (val) then
             rc = sdl_set_render_draw_color(main_renderer, &
                     uint8(40), uint8(80), uint8(40), uint8(255))
@@ -1274,7 +1313,7 @@ contains
             rc = sdl_set_render_draw_color(main_renderer, &
                     COL_GREEN%r, COL_GREEN%g, COL_GREEN%b, uint8(255))
             rc = sdl_render_draw_rect(main_renderer, br)
-            call draw_text_centered('Yes', sml_font, COL_GREEN, bx + 40, y - SML_FONT_SZ/2)
+            call draw_text_centered('Yes', sml_font, COL_GREEN, bx + 30, y - sml_font_h/2)
         else
             rc = sdl_set_render_draw_color(main_renderer, &
                     uint8(60), uint8(40), uint8(40), uint8(255))
@@ -1282,7 +1321,7 @@ contains
             rc = sdl_set_render_draw_color(main_renderer, &
                     COL_RED%r, COL_RED%g, COL_RED%b, uint8(255))
             rc = sdl_render_draw_rect(main_renderer, br)
-            call draw_text_centered('No', sml_font, COL_RED, bx + 40, y - SML_FONT_SZ/2)
+            call draw_text_centered('No', sml_font, COL_RED, bx + 30, y - sml_font_h/2)
         end if
     end subroutine
 
@@ -1304,34 +1343,34 @@ contains
 
         ! --- Left column (x 20..390) ---
         if (mx >= 20 .and. mx <= 390) then
-            ! General block: rows at y=210,236,262,288
-            if (my >= 197 .and. my <= 223) tip = 'Number of columns (odd recommended)'
-            if (my >= 223 .and. my <= 249) tip = 'Number of rows (odd recommended)'
-            if (my >= 249 .and. my <= 275) tip = 'Min distance in cells between spawns'
-            if (my >= 275 .and. my <= 301) tip = 'Host plays as the hider (Yes) or seeker (No)'
-            ! Bonuses block: rows at y=352,378,404,430
-            if (my >= 339 .and. my <= 365) tip = 'Dash forward in a straight line, reveals path'
-            if (my >= 365 .and. my <= 391) tip = 'Vision radius +1 to +3 (random, permanent)'
-            if (my >= 391 .and. my <= 417) tip = 'Reveals the entire map for this turn'
-            if (my >= 417 .and. my <= 443) tip = '+1 action per turn (permanent)'
+            ! General block: rows at y=224,250,276,302
+            if (my >= 211 .and. my <= 237) tip = 'Number of columns (odd recommended)'
+            if (my >= 237 .and. my <= 263) tip = 'Number of rows (odd recommended)'
+            if (my >= 263 .and. my <= 289) tip = 'Min distance in cells between spawns'
+            if (my >= 289 .and. my <= 315) tip = 'Host plays as the hider (Yes) or seeker (No)'
+            ! Bonuses block: rows at y=374,400,426,452
+            if (my >= 361 .and. my <= 387) tip = 'Dash forward in a straight line, reveals path'
+            if (my >= 387 .and. my <= 413) tip = 'Vision radius +1 to +3 (random, permanent)'
+            if (my >= 413 .and. my <= 439) tip = 'Reveals the entire map for this turn'
+            if (my >= 439 .and. my <= 465) tip = '+1 action per turn (permanent)'
         end if
 
         ! --- Right column (x 410..770) ---
         if (mx >= 410 .and. mx <= 770) then
-            ! Hider block: rows at y=210,236,262
-            if (my >= 197 .and. my <= 223) tip = 'Actions per turn for the hider'
-            if (my >= 223 .and. my <= 249) tip = 'Vision radius at game start for the hider'
-            if (my >= 249 .and. my <= 275) tip = 'Hider sees the full maze layout from start'
-            ! Seeker block: rows at y=326,352,378
-            if (my >= 313 .and. my <= 339) tip = 'Actions per turn for the seeker'
-            if (my >= 339 .and. my <= 365) tip = 'Vision radius at game start for the seeker'
-            if (my >= 365 .and. my <= 391) tip = 'Seeker sees the full maze layout from start'
+            ! Hider block: rows at y=224,250,276
+            if (my >= 211 .and. my <= 237) tip = 'Actions per turn for the hider'
+            if (my >= 237 .and. my <= 263) tip = 'Vision radius at game start for the hider'
+            if (my >= 263 .and. my <= 289) tip = 'Hider sees the full maze layout from start'
+            ! Seeker block: rows at y=348,374,400
+            if (my >= 335 .and. my <= 361) tip = 'Actions per turn for the seeker'
+            if (my >= 361 .and. my <= 387) tip = 'Vision radius at game start for the seeker'
+            if (my >= 387 .and. my <= 413) tip = 'Seeker sees the full maze layout from start'
         end if
 
         if (len_trim(tip) == 0) return
 
         ! Draw tooltip background + text near mouse
-        surf => ttf_render_text_solid(sml_font, trim(tip)//c_null_char, COL_WHITE)
+        surf => ttf_render_text_solid(sml_font, to_upper(trim(tip))//c_null_char, COL_WHITE)
         if (.not. associated(surf)) return
         tw = surf%w
         bgr = sdl_rect(mx + 12, my - 24, tw + 10, 22)
@@ -1476,16 +1515,20 @@ contains
                             call draw_ground_item(sx, sy, csz, gs%items(i)%itype)
                         end if
                     end do
+                    ! Draw key if visible and active
+                    if (gs%key_active .and. gs%key_x == ix .and. gs%key_y == iy) then
+                        call draw_key(sx, sy, csz)
+                    end if
                 else
-                    ! Not visible: show ghost if previously seen
+                    ! Not visible: show dimmed item if previously seen
                     do i = 1, gs%num_items
                         if (gs%items(i)%x == ix .and. gs%items(i)%y == iy) then
                             if (am_hider) then
                                 if (gs%h_item_seen(i)) &
-                                    call draw_ghost_item(sx, sy, csz)
+                                    call draw_ground_item_dimmed(sx, sy, csz, gs%items(i)%itype)
                             else
                                 if (gs%s_item_seen(i)) &
-                                    call draw_ghost_item(sx, sy, csz)
+                                    call draw_ground_item_dimmed(sx, sy, csz, gs%items(i)%itype)
                             end if
                         end if
                     end do
@@ -1590,7 +1633,27 @@ contains
         ! Draw letter (only if cell large enough)
         if (csz >= 20) then
             call draw_text_centered(letter, sml_font, COL_BLACK, &
-                                    sx + csz/2, sy + csz/2 - SML_FONT_SZ/2)
+                                    sx + csz/2, sy + csz/2 - sml_font_h/2)
+        end if
+    end subroutine
+
+    ! Draw the key on the maze
+    subroutine draw_key(sx, sy, csz)
+        integer, intent(in) :: sx, sy, csz
+        type(sdl_rect) :: ir
+        integer :: pad
+        pad = csz / 4
+        ir = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(255), uint8(215), uint8(0), uint8(230))
+        rc = sdl_render_fill_rect(main_renderer, ir)
+        ! Gold border
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(200), uint8(160), uint8(0), uint8(255))
+        rc = sdl_render_draw_rect(main_renderer, ir)
+        if (csz >= 20) then
+            call draw_text_centered('K', sml_font, COL_BLACK, &
+                                    sx + csz/2, sy + csz/2 - sml_font_h/2)
         end if
     end subroutine
 
@@ -1608,6 +1671,51 @@ contains
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(100), uint8(100), uint8(100), uint8(180))
         rc = sdl_render_draw_rect(main_renderer, ir)
+    end subroutine
+
+    ! Dimmed item: shows item type with reduced brightness in fog of war
+    subroutine draw_ground_item_dimmed(sx, sy, csz, itype)
+        integer, intent(in) :: sx, sy, csz, itype
+        type(sdl_rect) :: ir
+        integer :: pad
+        character(len=1) :: letter
+
+        pad = csz / 4
+        ir = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
+
+        ! Dimmed background color per item type (roughly half brightness)
+        select case (itype)
+            case (ITEM_DASH)
+                rc = sdl_set_render_draw_color(main_renderer, &
+                        uint8(120), uint8(65), uint8(15), uint8(140))
+                letter = 'D'
+            case (ITEM_VISION)
+                rc = sdl_set_render_draw_color(main_renderer, &
+                        uint8(80), uint8(40), uint8(120), uint8(140))
+                letter = 'V'
+            case (ITEM_ILLUMINATE)
+                rc = sdl_set_render_draw_color(main_renderer, &
+                        uint8(120), uint8(105), uint8(25), uint8(140))
+                letter = 'L'
+            case (ITEM_SPEED)
+                rc = sdl_set_render_draw_color(main_renderer, &
+                        uint8(25), uint8(105), uint8(60), uint8(140))
+                letter = 'S'
+            case default
+                return
+        end select
+        rc = sdl_render_fill_rect(main_renderer, ir)
+
+        ! Border
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(100), uint8(100), uint8(100), uint8(180))
+        rc = sdl_render_draw_rect(main_renderer, ir)
+
+        ! Draw letter (dimmed)
+        if (csz >= 20) then
+            call draw_text_centered(letter, sml_font, COL_DIM, &
+                                    sx + csz/2, sy + csz/2 - sml_font_h/2)
+        end if
     end subroutine
 
     ! -----------------------------------------------------------------
@@ -1683,7 +1791,7 @@ contains
     ! HUD rendering (bottom bar: inventory + info)
     ! -----------------------------------------------------------------
     subroutine render_hud()
-        integer :: hud_y, i, bx, ni, itype
+        integer :: hud_y, i, bx, ni, itype, spd, act
         type(sdl_rect) :: hr, ir
         character(len=64) :: label
         type(sdl_color) :: icol
@@ -1772,26 +1880,44 @@ contains
         end if
 
         ! --- Normal HUD right-side info ---
-        ! Vision radius (for both players now)
+        ! Turn indicator + actions remaining (bottom-left, under items)
+        if (is_my_turn() .and. .not. gs%game_over) then
+            if (am_hider) then
+                spd = gs%hider%speed; act = gs%hider%actions_left
+            else
+                spd = gs%seeker%speed; act = gs%seeker%actions_left
+            end if
+            if (spd > 1) then
+                write(label, '(A,I0,A,I0,A)') &
+                    'YOUR TURN  (', act, '/', spd, ' actions)'
+            else
+                label = 'YOUR TURN'
+            end if
+            call draw_text_at(sml_font, trim(label), COL_GREEN, 15, hud_y + 62)
+        else if (.not. gs%game_over) then
+            call draw_text_at(sml_font, 'Opponent''s turn...', COL_GRAY, 15, hud_y + 62)
+        end if
+
+        ! Vision radius + speed
         if (am_hider) then
             write(label, '(A,I0)') 'Vision: ', gs%hider%vision_radius
-            call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
+            call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 30)
             if (gs%hider%speed > 1) then
                 write(label, '(A,I0)') 'Speed: ', gs%hider%speed
-                call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 5)
+                call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 30)
             end if
         else
             write(label, '(A,I0)') 'Vision: ', gs%seeker%vision_radius
-            call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
+            call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 30)
             if (gs%seeker%speed > 1) then
                 write(label, '(A,I0)') 'Speed: ', gs%seeker%speed
-                call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 5)
+                call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 30)
             end if
         end if
 
         ! Turn number
         write(label, '(A,I0)') 'Turn: ', gs%turn_number
-        call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 30)
+        call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 5)
 
         ! Item direction hint
         if (gs%input_state == INPUT_ITEM_DIR) then
@@ -1863,7 +1989,7 @@ contains
                 cell_y = (my - oy) / csz + 1
                 if (cell_x >= 1 .and. cell_x <= gs%maze%w .and. &
                     cell_y >= 1 .and. cell_y <= gs%maze%h) then
-                    ! Only show tooltip for items in currently visible cells
+                    ! Show tooltip for items in currently visible cells
                     if ((am_hider .and. gs%h_visible(cell_x, cell_y)) .or. &
                         (.not. am_hider .and. gs%s_visible(cell_x, cell_y))) then
                         do i = 1, gs%num_items
@@ -1876,6 +2002,21 @@ contains
                                 exit
                             end if
                         end do
+                    ! Also show tooltip for remembered items in fog of war
+                    else if ((am_hider .and. gs%h_visited(cell_x, cell_y)) .or. &
+                             (.not. am_hider .and. gs%s_visited(cell_x, cell_y))) then
+                        do i = 1, gs%num_items
+                            if (gs%items(i)%x == cell_x .and. &
+                                gs%items(i)%y == cell_y) then
+                                if ((am_hider .and. gs%h_item_seen(i)) .or. &
+                                    (.not. am_hider .and. gs%s_item_seen(i))) then
+                                    itype = gs%items(i)%itype
+                                    tip = trim(game_item_name(itype)) // ': ' // &
+                                          trim(game_item_description(itype))
+                                    exit
+                                end if
+                            end if
+                        end do
                     end if
                 end if
             end if
@@ -1884,7 +2025,7 @@ contains
         if (len_trim(tip) == 0) return
 
         ! Draw tooltip background + text near mouse
-        surf => ttf_render_text_solid(sml_font, trim(tip)//c_null_char, COL_WHITE)
+        surf => ttf_render_text_solid(sml_font, to_upper(trim(tip))//c_null_char, COL_WHITE)
         if (.not. associated(surf)) return
         tw = surf%w
         bgr = sdl_rect(mx + 12, my - 24, tw + 10, 22)
@@ -1913,29 +2054,16 @@ contains
     ! Status overlay (turn indicator only — game over handled separately)
     ! -----------------------------------------------------------------
     subroutine render_status()
-        character(len=64) :: status_text
-        integer :: spd, act
-
         if (game_ended) return   ! handled by render_endgame_overlay
 
-        ! Turn indicator at top of screen
-        if (is_my_turn()) then
-            if (am_hider) then
-                spd = gs%hider%speed; act = gs%hider%actions_left
-            else
-                spd = gs%seeker%speed; act = gs%seeker%actions_left
-            end if
-            if (spd > 1) then
-                write(status_text, '(A,I0,A,I0,A)') &
-                    'YOUR TURN (', act, '/', spd, ' actions)'
-            else
-                status_text = 'YOUR TURN'
-            end if
-            call draw_text_centered(trim(status_text), sml_font, COL_GREEN, &
-                                    SCREEN_W/2, 2)
-        else
-            call draw_text_centered('Opponent''s turn...', sml_font, &
-                                    COL_GRAY, SCREEN_W/2, 2)
+        ! Green border around the game area when it's your turn
+        if (is_my_turn() .and. .not. gs%game_over) then
+            rc = sdl_set_render_draw_color(main_renderer, &
+                    uint8(0), uint8(200), uint8(0), uint8(255))
+            rc = sdl_render_draw_rect(main_renderer, &
+                    sdl_rect(0, 0, SCREEN_W, GAME_AREA_H))
+            rc = sdl_render_draw_rect(main_renderer, &
+                    sdl_rect(1, 1, SCREEN_W - 2, GAME_AREA_H - 2))
         end if
     end subroutine
 
@@ -2001,7 +2129,7 @@ contains
         type(c_ptr) :: tex
         type(sdl_rect) :: sr, dr
         if (len_trim(str)==0) return
-        surf => ttf_render_text_solid(fnt, trim(str)//c_null_char, color)
+        surf => ttf_render_text_solid(fnt, to_upper(trim(str))//c_null_char, color)
         if (.not. associated(surf)) return
         tex = sdl_create_texture_from_surface(main_renderer, surf)
         sr = sdl_rect(0, 0, surf%w, surf%h)
@@ -2021,7 +2149,7 @@ contains
         type(sdl_rect) :: sr, dr
         integer :: x
         if (len_trim(str)==0) return
-        surf => ttf_render_text_solid(fnt, trim(str)//c_null_char, color)
+        surf => ttf_render_text_solid(fnt, to_upper(trim(str))//c_null_char, color)
         if (.not. associated(surf)) return
         tex = sdl_create_texture_from_surface(main_renderer, surf)
         x = cx - surf%w/2
@@ -2046,7 +2174,7 @@ contains
         rc = sdl_render_draw_rect(main_renderer, br)
         br = sdl_rect(x+1, y+1, w-2, h-2)
         rc = sdl_render_draw_rect(main_renderer, br)
-        call draw_text_centered(label, sml_font, color, x+w/2, y+(h-SML_FONT_SZ)/2)
+        call draw_text_centered(label, sml_font, color, x+w/2, y+(h-sml_font_h)/2)
     end subroutine
 
     subroutine draw_input_field(x, y, w, h, txt, is_active)
@@ -2067,7 +2195,7 @@ contains
         end if
         rc = sdl_render_draw_rect(main_renderer, fr)
         if (len_trim(txt)>0) &
-            call draw_text_at(sml_font, txt, COL_WHITE, x+8, y+(h-SML_FONT_SZ)/2)
+            call draw_text_at(sml_font, txt, COL_WHITE, x+8, y+(h-sml_font_h)/2)
         if (is_active) then
             block
                 integer :: ticks, cx2
@@ -2078,7 +2206,7 @@ contains
                     cx2 = x + 8
                     if (len_trim(txt)>0) then
                         ms => ttf_render_text_solid(sml_font, &
-                            trim(txt)//c_null_char, COL_WHITE)
+                            to_upper(trim(txt))//c_null_char, COL_WHITE)
                         if (associated(ms)) then
                             cx2 = x + 8 + ms%w
                             call sdl_free_surface(ms)
