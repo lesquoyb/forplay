@@ -26,8 +26,8 @@ In the darkness, only one will prevail.
 
 Two players compete in a randomly generated maze. The roles are asymmetric:
 
-- **Hider** (host, red) — sees the full maze layout but has limited vision of items and the opponent. Goal: evade the seeker.
-- **Seeker** (client, blue) — full fog of war (only sees nearby cells). Goal: find and reach the hider.
+- **Hider** (red) — discovers the maze as he moves, but fear makes him run faster. Goal: evade the seeker and find the way out of the maze.
+- **Seeker** (blue) — knows the maze like the back of his hand, but can't move fast. Goal: find and reach the hider.
 
 The game is **turn-based**. Each turn, the active player can:
 
