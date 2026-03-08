@@ -553,6 +553,33 @@ contains
         end if
     end subroutine
 
+    subroutine game_do_use_vision(gs, p, i)
+        type(game_state), intent(inout) :: gs
+        type(player_type), intent(inout) :: p
+        integer, intent(in) :: i
+
+        real :: rval
+        integer :: boost
+        call random_number(rval)
+        boost = 1 + int(rval * 3.0)
+        if (boost > 3) boost = 3
+        p%vision_radius = p%vision_radius + boost
+        gs%items(i)%active = .false.
+
+        p%vision_radius = p%vision_radius + 1
+        call game_compute_visibility(gs)
+    end subroutine
+
+    subroutine game_do_use_speed(gs, p, i)
+        type(game_state), intent(inout) :: gs
+        type(player_type), intent(inout) :: p
+        integer, intent(in) :: i
+
+        p%speed = p%speed + 1
+        p%actions_left = p%actions_left + 1
+        gs%items(i)%active = .false.
+    end subroutine
+
     ! =========================================================================
     ! Private helpers
     ! =========================================================================
@@ -566,11 +593,21 @@ contains
         do i = 1, gs%num_items
             if (gs%items(i)%active .and. &
                 gs%items(i)%x == p%x .and. gs%items(i)%y == p%y) then
-                if (p%num_items < MAX_INVENTORY) then
-                    p%num_items = p%num_items + 1
-                    p%inventory(p%num_items) = gs%items(i)%itype
-                    gs%items(i)%active = .false.
-                end if
+                select case (gs%items(i)%itype)
+                case (ITEM_VISION)
+                    ! Instantly apply vision boost
+                    call game_do_use_vision(gs, p, i) ! use the vision item instantly
+                case (ITEM_SPEED)
+                    ! Instantly apply speed boost
+                    call game_do_use_speed(gs, p, i) ! use the speed item instantly
+
+                case default
+                    if (p%num_items < MAX_INVENTORY) then
+                        p%num_items = p%num_items + 1
+                        p%inventory(p%num_items) = gs%items(i)%itype
+                        gs%items(i)%active = .false.
+                    end if
+                end select
             end if
         end do
     end subroutine

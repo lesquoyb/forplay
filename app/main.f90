@@ -1835,6 +1835,10 @@ contains
                 else
                     itype = gs%seeker%inventory(i)
                 end if
+                if (itype == ITEM_VISION .or. itype == ITEM_SPEED) then
+                    ! Skip drawing vision/speed (should never be present, but just in case)
+                    cycle
+                end if
                 call item_color(itype, icol)
                 rc = sdl_set_render_draw_color(main_renderer, &
                         icol%r, icol%g, icol%b, uint8(200))
