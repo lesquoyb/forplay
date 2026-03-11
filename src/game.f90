@@ -475,12 +475,22 @@ contains
             gs%h_last_opp_x = gs%seeker%x
             gs%h_last_opp_y = gs%seeker%y
             gs%h_opp_seen = .true.
+        else if (gs%h_opp_seen) then
+            ! Ghost position is now visible but opponent is not there: clear ghost
+            if (gs%h_visible(gs%h_last_opp_x, gs%h_last_opp_y)) then
+                gs%h_opp_seen = .false.
+            end if
         end if
         ! Seeker tracks hider
         if (gs%s_visible(gs%hider%x, gs%hider%y)) then
             gs%s_last_opp_x = gs%hider%x
             gs%s_last_opp_y = gs%hider%y
             gs%s_opp_seen = .true.
+        else if (gs%s_opp_seen) then
+            ! Ghost position is now visible but opponent is not there: clear ghost
+            if (gs%s_visible(gs%s_last_opp_x, gs%s_last_opp_y)) then
+                gs%s_opp_seen = .false.
+            end if
         end if
 
         ! --- Update per-player item memory ---
