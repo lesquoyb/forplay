@@ -23,7 +23,7 @@ module game_mod
 
     ! --- Public API ---
     public :: game_state, player_type, ground_item_type
-    public :: ITEM_NONE, ITEM_DASH, ITEM_VISION, ITEM_ILLUMINATE, ITEM_SPEED
+    public :: ITEM_NONE, ITEM_DASH, ITEM_VISION, ITEM_ILLUMINATE, ITEM_SPEED, ITEM_WALL_BREAK
     public :: NUM_ITEM_TYPES, MAX_INVENTORY, MAX_GROUND_ITEMS
     public :: ROLE_HIDER, ROLE_SEEKER
     public :: INPUT_MOVE, INPUT_ITEM_DIR, INPUT_WAIT
@@ -38,7 +38,8 @@ module game_mod
     integer, parameter :: ITEM_VISION     = 2
     integer, parameter :: ITEM_ILLUMINATE = 3
     integer, parameter :: ITEM_SPEED      = 4
-    integer, parameter :: NUM_ITEM_TYPES  = 4
+    integer, parameter :: ITEM_WALL_BREAK = 5
+    integer, parameter :: NUM_ITEM_TYPES  = 5
 
     ! --- Player roles ---
     integer, parameter :: ROLE_HIDER  = 0
@@ -119,12 +120,14 @@ contains
     ! min_dist: minimum BFS distance between hider and seeker spawns.
     ! =========================================================================
     subroutine game_init(gs, maze_w, maze_h, item_counts, min_dist, &
-                         speed_h, speed_s, vision_h, vision_s, reveal_h, reveal_s)
+                         speed_h, speed_s, vision_h, vision_s, reveal_h, reveal_s, &
+                         branch_prob)
         type(game_state), intent(out) :: gs
         integer, intent(in) :: maze_w, maze_h, min_dist, speed_h, speed_s
         integer, intent(in) :: vision_h, vision_s
         logical, intent(in) :: reveal_h, reveal_s
         integer, intent(in) :: item_counts(NUM_ITEM_TYPES)
+        real, intent(in) :: branch_prob
 
         integer :: i, j, x, y, itype, attempts, d
         real    :: rval
@@ -133,7 +136,7 @@ contains
 
         ! Generate the maze
         call random_seed()
-        call maze_generate(gs%maze, maze_w, maze_h)
+        call maze_generate(gs%maze, maze_w, maze_h, branch_prob)
 
         ! Place hider at a random cell
         call random_number(rval); hx = 1 + int(rval * maze_w)
@@ -157,7 +160,7 @@ contains
             attempts = attempts + 1
             ! After many failures, regenerate the maze and hider spot
             if (attempts > 200) then
-                call maze_generate(gs%maze, maze_w, maze_h)
+                call maze_generate(gs%maze, maze_w, maze_h, branch_prob)
                 call random_number(rval); hx = 1 + int(rval * maze_w)
                 if (hx > maze_w) hx = maze_w
                 call random_number(rval); hy = 1 + int(rval * maze_h)
@@ -348,6 +351,13 @@ contains
                     gs%seeker%speed = gs%seeker%speed + 1
                 end if
 
+            case (ITEM_WALL_BREAK)
+                if (role == ROLE_HIDER) then
+                    if (.not. maze_break_wall(gs%maze, gs%hider%x, gs%hider%y, d)) return
+                else
+                    if (.not. maze_break_wall(gs%maze, gs%seeker%x, gs%seeker%y, d)) return
+                end if
+
         end select
 
         ! Remove item from inventory
@@ -367,7 +377,7 @@ contains
     function game_item_needs_direction(itype) result(needs)
         integer, intent(in) :: itype
         logical :: needs
-        needs = (itype == ITEM_DASH)
+        needs = (itype == ITEM_DASH .or. itype == ITEM_WALL_BREAK)
     end function
 
     ! =========================================================================
@@ -381,6 +391,7 @@ contains
             case (ITEM_VISION);     name = 'Vision'
             case (ITEM_ILLUMINATE); name = 'Light'
             case (ITEM_SPEED);      name = 'Speed'
+            case (ITEM_WALL_BREAK); name = 'Pickaxe'
             case default;           name = '???'
         end select
     end function
@@ -400,6 +411,8 @@ contains
                 desc = 'Reveals the entire map for this turn'
             case (ITEM_SPEED)
                 desc = '+1 action per turn (permanent)'
+            case (ITEM_WALL_BREAK)
+                desc = 'Break an adjacent wall in a direction'
             case default
                 desc = ' '
         end select

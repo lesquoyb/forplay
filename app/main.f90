@@ -33,6 +33,7 @@ program forplay
     integer, parameter :: DEFAULT_ITEM_VISION_COUNT     = 2
     integer, parameter :: DEFAULT_ITEM_ILLUMINATE_COUNT = 2
     integer, parameter :: DEFAULT_ITEM_SPEED_COUNT      = 1
+    integer, parameter :: DEFAULT_ITEM_WALL_BREAK_COUNT  = 2
     integer, parameter :: DEFAULT_MIN_DIST  = 15
     integer, parameter :: DEFAULT_SPEED_H   = 2
     integer, parameter :: DEFAULT_SPEED_S   = 1
@@ -97,6 +98,7 @@ program forplay
     integer :: cfg_vision_h, cfg_vision_s
     logical :: cfg_reveal_h, cfg_reveal_s
     logical :: cfg_host_hides
+    integer :: cfg_branch_pct  ! branch probability as integer 0-100 (percent)
 
     ! Modal / end-game state
     logical :: show_quit_modal     ! confirmation dialog visible
@@ -148,6 +150,12 @@ program forplay
     main_renderer = sdl_create_renderer(main_window, -1, SDL_RENDERER_ACCELERATED)
     if (.not. c_associated(main_renderer)) stop 'Renderer creation failed'
 
+    ! Enable alpha blending so that draw calls with alpha < 255 blend
+    ! against the existing framebuffer instead of overwriting the alpha
+    ! channel.  Without this, Linux compositors (Wayland, picom, mutter …)
+    ! see alpha < 255 and make parts of the window transparent.
+    rc = sdl_set_render_draw_blend_mode(main_renderer, SDL_BLENDMODE_BLEND)
+
     title_font = load_font('resources/fonts/pixel musketeer/Pixel Musketeer.otf', TITLE_FONT_SZ)
     big_font   = load_font('resources/fonts/omega pixel biform/omega-pixel-biform.ttf', MAIN_FONT_SZ)
     sml_font   = load_font('resources/fonts/omega pixel biform/omega-pixel-biform.ttf', SML_FONT_SZ)
@@ -183,6 +191,7 @@ program forplay
     cfg_item_counts(ITEM_VISION)        = DEFAULT_ITEM_VISION_COUNT
     cfg_item_counts(ITEM_ILLUMINATE)    = DEFAULT_ITEM_ILLUMINATE_COUNT
     cfg_item_counts(ITEM_SPEED)         = DEFAULT_ITEM_SPEED_COUNT
+    cfg_item_counts(ITEM_WALL_BREAK)     = DEFAULT_ITEM_WALL_BREAK_COUNT
     cfg_min_dist      = DEFAULT_MIN_DIST
     cfg_speed_h       = DEFAULT_SPEED_H
     cfg_speed_s       = DEFAULT_SPEED_S
@@ -191,6 +200,7 @@ program forplay
     cfg_reveal_h      = .false.
     cfg_reveal_s      = .true.
     cfg_host_hides    = .true.
+    cfg_branch_pct    = 5
     show_quit_modal   = .false.
     game_ended        = .false.
     endgame_msg       = ' '
@@ -292,41 +302,76 @@ contains
         character(len=*), intent(in) :: path
         integer, intent(in) :: sz
         type(c_ptr) :: f
+        character(len=:), allocatable :: base_path
+        character(len=512) :: fullpath
+
+        ! Try relative to CWD first (works with fpm run from project root)
         f = ttf_open_font(trim(path) // c_null_char, sz)
+        if (c_associated(f)) return
+
+        ! Try relative to the executable location.
+        ! With fpm the binary lives in build/<hash>/app/, so go up 3 levels.
+        base_path = sdl_get_base_path()
+        if (allocated(base_path)) then
+            ! fonts next to executable (deployed layout)
+            fullpath = base_path // path
+            f = ttf_open_font(trim(fullpath) // c_null_char, sz)
+            if (c_associated(f)) return
+
+            ! fpm build layout: build/<hash>/app/  →  ../../.. = project root
+            fullpath = base_path // '../../../' // path
+            f = ttf_open_font(trim(fullpath) // c_null_char, sz)
+            if (c_associated(f)) return
+
+            ! one level up (in case run from build/ directly)
+            fullpath = base_path // '../' // path
+            f = ttf_open_font(trim(fullpath) // c_null_char, sz)
+            if (c_associated(f)) return
+        end if
+
+        write (stderr, '(A,A)') 'Warning: font not found: ', trim(path)
     end function
 
     function try_load_font(sz) result(f)
         integer, intent(in) :: sz
         type(c_ptr) :: f
-        character(len=256) :: paths(20)
-        integer :: i
-        ! Bundled font (works everywhere)
-        paths(1) = 'resources/DejaVuSansMono.ttf'
-        paths(2) = './resources/DejaVuSansMono.ttf'
+        character(len=256) :: paths(24)
+        character(len=:), allocatable :: base_path
+        integer :: i, n
+        n = 0
+        ! Bundled font (works everywhere) — relative to CWD
+        n = n+1; paths(n) = 'resources/DejaVuSansMono.ttf'
+        n = n+1; paths(n) = './resources/DejaVuSansMono.ttf'
+        ! Bundled font relative to executable (fpm layout: up 3 levels)
+        base_path = sdl_get_base_path()
+        if (allocated(base_path)) then
+            n = n+1; paths(n) = base_path // '../../../resources/DejaVuSansMono.ttf'
+            n = n+1; paths(n) = base_path // 'resources/DejaVuSansMono.ttf'
+        end if
         ! Windows fonts
-        paths(3) = 'C:/Windows/Fonts/consola.ttf'
-        paths(4) = 'C:/Windows/Fonts/arial.ttf'
-        paths(5) = 'C:/Windows/Fonts/segoeui.ttf'
-        paths(6) = 'C:/Windows/Fonts/cour.ttf'
-        paths(7) = 'C:/Windows/Fonts/lucon.ttf'
+        n = n+1; paths(n) = 'C:/Windows/Fonts/consola.ttf'
+        n = n+1; paths(n) = 'C:/Windows/Fonts/arial.ttf'
+        n = n+1; paths(n) = 'C:/Windows/Fonts/segoeui.ttf'
+        n = n+1; paths(n) = 'C:/Windows/Fonts/cour.ttf'
+        n = n+1; paths(n) = 'C:/Windows/Fonts/lucon.ttf'
         ! Linux fonts (Debian/Ubuntu)
-        paths(8) = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
-        paths(9) = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
-        paths(10) = '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf'
-        paths(11) = '/usr/share/fonts/truetype/freefont/FreeMono.ttf'
-        paths(12) = '/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf'
+        n = n+1; paths(n) = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
+        n = n+1; paths(n) = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+        n = n+1; paths(n) = '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf'
+        n = n+1; paths(n) = '/usr/share/fonts/truetype/freefont/FreeMono.ttf'
+        n = n+1; paths(n) = '/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf'
         ! Linux fonts (Fedora/Arch/openSUSE)
-        paths(13) = '/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf'
-        paths(14) = '/usr/share/fonts/TTF/DejaVuSansMono.ttf'
-        paths(15) = '/usr/share/fonts/dejavu/DejaVuSansMono.ttf'
+        n = n+1; paths(n) = '/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf'
+        n = n+1; paths(n) = '/usr/share/fonts/TTF/DejaVuSansMono.ttf'
+        n = n+1; paths(n) = '/usr/share/fonts/dejavu/DejaVuSansMono.ttf'
         ! macOS fonts
-        paths(16) = '/System/Library/Fonts/Supplemental/Courier New.ttf'
-        paths(17) = '/System/Library/Fonts/Helvetica.ttc'
-        paths(18) = '/System/Library/Fonts/SFNSMono.ttf'
-        paths(19) = '/Library/Fonts/Arial.ttf'
-        paths(20) = '/System/Library/Fonts/Supplemental/Arial.ttf'
+        n = n+1; paths(n) = '/System/Library/Fonts/Supplemental/Courier New.ttf'
+        n = n+1; paths(n) = '/System/Library/Fonts/Helvetica.ttc'
+        n = n+1; paths(n) = '/System/Library/Fonts/SFNSMono.ttf'
+        n = n+1; paths(n) = '/Library/Fonts/Arial.ttf'
+        n = n+1; paths(n) = '/System/Library/Fonts/Supplemental/Arial.ttf'
         f = c_null_ptr
-        do i = 1, 20
+        do i = 1, n
             f = ttf_open_font(trim(paths(i)) // c_null_char, sz)
             if (c_associated(f)) return
         end do
@@ -377,7 +422,7 @@ contains
         ! Compute button Y to match render_host
         ! Left: General 4 rows at 224,250,276,302; Bonuses header+sep; 4 rows at 374,400,426,452
         ! Right: Hider 3 rows at 224,250,276; Seeker header+sep; 3 rows at 348,374,400
-        ly = 478   ! left column final ly
+        ly = 530   ! left column final ly
         ry = 426   ! right column final ry
         py = max(ly, ry) + 10
 
@@ -409,35 +454,46 @@ contains
             if (mx >= 240 .and. mx <= 262) cfg_min_dist = max(1, cfg_min_dist - 1)
             if (mx >= 315 .and. mx <= 337) cfg_min_dist = min(99, cfg_min_dist + 1)
         end if
-        ! Row: Host hides toggle (y=302), toggle at x=240..300
+        ! Row: Branch % (y=302)
         if (my >= 289 .and. my <= 315) then
+            if (mx >= 240 .and. mx <= 262) cfg_branch_pct = max(0, cfg_branch_pct - 1)
+            if (mx >= 315 .and. mx <= 337) cfg_branch_pct = min(50, cfg_branch_pct + 1)
+        end if
+        ! Row: Host hides toggle (y=328), toggle at x=240..300
+        if (my >= 315 .and. my <= 341) then
             if (mx >= 240 .and. mx <= 300) cfg_host_hides = .not. cfg_host_hides
         end if
 
         ! -- Bonuses block --
-        ! Row: Nb Dash (y=374)
-        if (my >= 361 .and. my <= 387) then
+        ! Row: Nb Dash (y=400)
+        if (my >= 387 .and. my <= 413) then
             if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_DASH) = max(0, cfg_item_counts(ITEM_DASH) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_DASH) = cfg_item_counts(ITEM_DASH) + 1
         end if
-        ! Row: Nb Vision (y=400)
-        if (my >= 387 .and. my <= 413) then
+        ! Row: Nb Vision (y=426)
+        if (my >= 413 .and. my <= 439) then
             if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_VISION) = max(0, cfg_item_counts(ITEM_VISION) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_VISION) = cfg_item_counts(ITEM_VISION) + 1
         end if
-        ! Row: Nb Light (y=426)
-        if (my >= 413 .and. my <= 439) then
+        ! Row: Nb Light (y=452)
+        if (my >= 439 .and. my <= 465) then
             if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_ILLUMINATE) = cfg_item_counts(ITEM_ILLUMINATE) + 1
         end if
-        ! Row: Nb Speed (y=452)
-        if (my >= 439 .and. my <= 465) then
+        ! Row: Nb Speed (y=478)
+        if (my >= 465 .and. my <= 491) then
             if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_SPEED) = cfg_item_counts(ITEM_SPEED) + 1
+        end if
+        ! Row: Nb Pickaxe (y=504)
+        if (my >= 491 .and. my <= 517) then
+            if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_WALL_BREAK) = max(0, cfg_item_counts(ITEM_WALL_BREAK) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
+                cfg_item_counts(ITEM_WALL_BREAK) = cfg_item_counts(ITEM_WALL_BREAK) + 1
         end if
 
         ! ===== RIGHT COLUMN (x_base=410): minus at 630, plus at 705 =====
@@ -890,7 +946,7 @@ contains
 
         call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_item_counts, cfg_min_dist, &
                       cfg_speed_h, cfg_speed_s, cfg_vision_h, cfg_vision_s, &
-                      cfg_reveal_h, cfg_reveal_s)
+                      cfg_reveal_h, cfg_reveal_s, real(cfg_branch_pct) / 100.0)
         call send_game_init()
 
         game_ready   = .true.
@@ -915,7 +971,7 @@ contains
 
         call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_item_counts, cfg_min_dist, &
                       cfg_speed_h, cfg_speed_s, cfg_vision_h, cfg_vision_s, &
-                      cfg_reveal_h, cfg_reveal_s)
+                      cfg_reveal_h, cfg_reveal_s, real(cfg_branch_pct) / 100.0)
         print *, '[HOST] game_init done, maze=', gs%maze%w, 'x', gs%maze%h, &
                  ' items=', gs%num_items
         call send_game_init()
@@ -1202,6 +1258,7 @@ contains
         call draw_param_row_at(20, ly, 'Width',     cfg_maze_w);  ly = ly + 26
         call draw_param_row_at(20, ly, 'Height',    cfg_maze_h);  ly = ly + 26
         call draw_param_row_at(20, ly, 'Min dist.', cfg_min_dist); ly = ly + 26
+        call draw_param_row_at(20, ly, 'Branch %',  cfg_branch_pct); ly = ly + 26
         call draw_toggle_row_at(20, ly, 'Host hides', cfg_host_hides); ly = ly + 26
 
         ! --- Bonuses block ---
@@ -1216,6 +1273,7 @@ contains
         call draw_param_row_at(20, ly, 'Nb Vision', cfg_item_counts(ITEM_VISION));  ly = ly + 26
         call draw_param_row_at(20, ly, 'Nb Light',  cfg_item_counts(ITEM_ILLUMINATE)); ly = ly + 26
         call draw_param_row_at(20, ly, 'Nb Speed',  cfg_item_counts(ITEM_SPEED));   ly = ly + 26
+        call draw_param_row_at(20, ly, 'Nb Pickaxe', cfg_item_counts(ITEM_WALL_BREAK)); ly = ly + 26
 
         ! ===== RIGHT COLUMN =====
         ! --- Hider block ---
@@ -1343,16 +1401,18 @@ contains
 
         ! --- Left column (x 20..390) ---
         if (mx >= 20 .and. mx <= 390) then
-            ! General block: rows at y=224,250,276,302
+            ! General block: rows at y=224,250,276,302,328
             if (my >= 211 .and. my <= 237) tip = 'Number of columns (odd recommended)'
             if (my >= 237 .and. my <= 263) tip = 'Number of rows (odd recommended)'
             if (my >= 263 .and. my <= 289) tip = 'Min distance in cells between spawns'
-            if (my >= 289 .and. my <= 315) tip = 'Host plays as the hider (Yes) or seeker (No)'
-            ! Bonuses block: rows at y=374,400,426,452
-            if (my >= 361 .and. my <= 387) tip = 'Dash forward in a straight line, reveals path'
-            if (my >= 387 .and. my <= 413) tip = 'Vision radius +1 to +3 (random, permanent)'
-            if (my >= 413 .and. my <= 439) tip = 'Reveals the entire map for this turn'
-            if (my >= 439 .and. my <= 465) tip = '+1 action per turn (permanent)'
+            if (my >= 289 .and. my <= 315) tip = 'Extra wall removals (0=perfect maze, 50=very open)'
+            if (my >= 315 .and. my <= 341) tip = 'Host plays as the hider (Yes) or seeker (No)'
+            ! Bonuses block: rows at y=400,426,452,478,504
+            if (my >= 387 .and. my <= 413) tip = 'Dash forward in a straight line, reveals path'
+            if (my >= 413 .and. my <= 439) tip = 'Vision radius +1 to +3 (random, permanent)'
+            if (my >= 439 .and. my <= 465) tip = 'Reveals the entire map for this turn'
+            if (my >= 465 .and. my <= 491) tip = '+1 action per turn (permanent)'
+            if (my >= 491 .and. my <= 517) tip = 'Break an adjacent wall in a given direction'
         end if
 
         ! --- Right column (x 410..770) ---
@@ -1625,6 +1685,10 @@ contains
                 rc = sdl_set_render_draw_color(main_renderer, &
                         uint8(50), uint8(220), uint8(130), uint8(200))
                 letter = 'S'
+            case (ITEM_WALL_BREAK)
+                rc = sdl_set_render_draw_color(main_renderer, &
+                        uint8(180), uint8(120), uint8(60), uint8(200))
+                letter = 'P'
             case default
                 return
         end select
@@ -1701,6 +1765,10 @@ contains
                 rc = sdl_set_render_draw_color(main_renderer, &
                         uint8(25), uint8(105), uint8(60), uint8(140))
                 letter = 'S'
+            case (ITEM_WALL_BREAK)
+                rc = sdl_set_render_draw_color(main_renderer, &
+                        uint8(90), uint8(60), uint8(30), uint8(140))
+                letter = 'P'
             case default
                 return
         end select
@@ -1941,6 +2009,7 @@ contains
             case (ITEM_VISION);     col = COL_PURPLE
             case (ITEM_ILLUMINATE); col = COL_YELLOW
             case (ITEM_SPEED);      col = COL_GREEN
+            case (ITEM_WALL_BREAK); col = COL_ORANGE
             case default;           col = COL_GRAY
         end select
     end subroutine

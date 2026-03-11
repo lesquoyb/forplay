@@ -13,6 +13,14 @@ module maze_mod
     public :: MAZE_MAX_W, MAZE_MAX_H
     public :: maze_generate, maze_can_move, maze_move_delta
     public :: maze_shortest_path
+    public :: maze_break_wall
+    ! (removed duplicate public statement)
+    ! =========================================================================
+    ! Break the wall adjacent to (x, y) in direction d, if a wall exists.
+    ! If there is no wall, nothing happens.
+    ! Returns .true. if a wall was broken, .false. otherwise.
+    ! =========================================================================
+    ! (removed duplicate implementation)
 
     ! Wall bit flags
     integer, parameter :: WALL_N = 1   ! bit 0 - north wall
@@ -39,12 +47,46 @@ module maze_mod
 contains
 
     ! =========================================================================
+    ! Break the wall adjacent to (x, y) in direction d, if a wall exists.
+    ! If there is no wall, nothing happens.
+    ! Returns .true. if a wall was broken, .false. otherwise.
+    ! =========================================================================
+    function maze_break_wall(m, x, y, d) result(broken)
+        type(maze_type), intent(inout) :: m
+        integer, intent(in) :: x, y, d
+        logical :: broken
+        integer :: nx, ny, wall_bit, opp_wall_bit
+
+        broken = .false.
+        select case (d)
+            case (DIR_N)
+                nx = x; ny = y - 1; wall_bit = WALL_N; opp_wall_bit = WALL_S
+            case (DIR_E)
+                nx = x + 1; ny = y; wall_bit = WALL_E; opp_wall_bit = WALL_W
+            case (DIR_S)
+                nx = x; ny = y + 1; wall_bit = WALL_S; opp_wall_bit = WALL_N
+            case (DIR_W)
+                nx = x - 1; ny = y; wall_bit = WALL_W; opp_wall_bit = WALL_E
+            case default
+                return
+        end select
+
+        if (nx < 1 .or. nx > m%w .or. ny < 1 .or. ny > m%h) return
+        if (iand(m%cells(x, y), wall_bit) /= 0) then
+            m%cells(x, y) = iand(m%cells(x, y), not(wall_bit))
+            m%cells(nx, ny) = iand(m%cells(nx, ny), not(opp_wall_bit))
+            broken = .true.
+        end if
+    end function
+
+    ! =========================================================================
     ! Generate a random perfect maze using recursive backtracking (DFS).
     ! A perfect maze has exactly one path between any two cells.
     ! =========================================================================
-    subroutine maze_generate(m, w, h)
+    subroutine maze_generate(m, w, h, branch_prob)
         type(maze_type), intent(out) :: m
         integer, intent(in) :: w, h
+        real, intent(in) :: branch_prob
 
         integer :: vis(MAZE_MAX_W, MAZE_MAX_H)
         integer :: stk_x(MAZE_MAX_W * MAZE_MAX_H)
@@ -52,6 +94,7 @@ contains
         integer :: sp, cx, cy, nx, ny
         integer :: dirs(4), nd, pick, d
         real    :: rval
+        integer :: x, y, d2, nx2, ny2, wall_bit, opp_wall_bit
 
         m%w = w
         m%h = h
@@ -126,6 +169,33 @@ contains
             else
                 sp = sp - 1
             end if
+        end do
+        ! Post-processing: randomly remove walls to add extra branches
+        do y = 1, h
+            do x = 1, w
+                do d2 = 0, 3
+                    select case (d2)
+                        case (DIR_N)
+                            nx2 = x; ny2 = y - 1; wall_bit = WALL_N; opp_wall_bit = WALL_S
+                        case (DIR_E)
+                            nx2 = x + 1; ny2 = y; wall_bit = WALL_E; opp_wall_bit = WALL_W
+                        case (DIR_S)
+                            nx2 = x; ny2 = y + 1; wall_bit = WALL_S; opp_wall_bit = WALL_N
+                        case (DIR_W)
+                            nx2 = x - 1; ny2 = y; wall_bit = WALL_W; opp_wall_bit = WALL_E
+                        case default
+                            cycle
+                    end select
+                    if (nx2 < 1 .or. nx2 > w .or. ny2 < 1 .or. ny2 > h) cycle
+                    if (iand(m%cells(x, y), wall_bit) /= 0) then
+                        call random_number(rval)
+                        if (rval < branch_prob) then
+                            m%cells(x, y) = iand(m%cells(x, y), not(wall_bit))
+                            m%cells(nx2, ny2) = iand(m%cells(nx2, ny2), not(opp_wall_bit))
+                        end if
+                    end if
+                end do
+            end do
         end do
     end subroutine
 

@@ -17,6 +17,18 @@ module network
     public :: net_try_accept_nonblocking
     public :: net_send_bytes, net_recv_all, net_try_recv_bytes
 
+    ! Portable C helper for setting non-blocking mode.
+    ! On Linux/macOS this uses fcntl() instead of the variadic ioctl(),
+    ! avoiding ABI issues when calling variadic C functions from Fortran.
+    interface
+        function c_set_nonblocking(fd, enable) bind(C, name="c_set_nonblocking")
+            import :: c_int
+            integer(c_int), value :: fd
+            integer(c_int), value :: enable
+            integer(c_int) :: c_set_nonblocking
+        end function
+    end interface
+
 contains
 
     ! ==================================================================
@@ -104,7 +116,6 @@ contains
         character(len=*), intent(out) :: cli_ip
         logical, intent(out) :: got_client
 
-        integer(c_long), target :: mode
         integer(c_int) :: res
         type(sockaddr_in), target :: peer_addr
         integer(c_int), target :: peer_addrlen
@@ -117,15 +128,13 @@ contains
         cli_fd = -1
 
         ! Set non-blocking
-        mode = 1_c_long
-        res = ioctlsocket(srv_fd, FIONBIO, c_loc(mode))
+        res = c_set_nonblocking(srv_fd, 1_c_int)
 
         ! Try accept (like example: c_null_ptr, 0_c_int)
         cli_fd = accept(srv_fd, c_null_ptr, 0_c_int)
 
         ! Restore blocking
-        mode = 0_c_long
-        res = ioctlsocket(srv_fd, FIONBIO, c_loc(mode))
+        res = c_set_nonblocking(srv_fd, 0_c_int)
 
         if (cli_fd >= 0) then
             got_client = .true.
@@ -170,7 +179,6 @@ contains
 
         type(sockaddr_in), target :: addr
         integer(c_int) :: status
-        integer(c_long), target :: mode
 
         error_msg = ' '
 
@@ -195,8 +203,7 @@ contains
         addr%sin_zero = c_null_char
 
         ! Set non-blocking before connect
-        mode = 1_c_long
-        status = ioctlsocket(sock_fd, FIONBIO, c_loc(mode))
+        status = c_set_nonblocking(sock_fd, 1_c_int)
 
         status = connect(sock_fd, c_loc(addr), int(c_sizeof(addr), c_int))
         if (status /= 0) then
@@ -236,7 +243,6 @@ contains
 
         integer(c_int), target :: sock_err, optlen
         integer(c_int) :: res
-        integer(c_long), target :: mode
 
         error_msg = ' '
         result = 0  ! pending
@@ -269,8 +275,7 @@ contains
             end block
             if (res == 0) then
                 ! Connected! Restore blocking mode
-                mode = 0_c_long
-                res = ioctlsocket(sock_fd, FIONBIO, c_loc(mode))
+                res = c_set_nonblocking(sock_fd, 0_c_int)
                 ! Set TCP_NODELAY
                 block
                     integer(c_int), target :: opt_on
@@ -431,19 +436,16 @@ contains
         integer(c_int), intent(in)  :: maxlen
         integer(c_int), intent(out) :: received
 
-        integer(c_long), target :: mode
         integer(c_int) :: res
 
         received = 0
 
-        mode = 1_c_long
-        res = ioctlsocket(sockfd, FIONBIO, c_loc(mode))
+        res = c_set_nonblocking(sockfd, 1_c_int)
 
         received = recv(sockfd, c_loc(buf), maxlen, 0_c_int)
         if (received < 0) received = 0
 
-        mode = 0_c_long
-        res = ioctlsocket(sockfd, FIONBIO, c_loc(mode))
+        res = c_set_nonblocking(sockfd, 0_c_int)
     end subroutine
 
 end module network
