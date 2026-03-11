@@ -27,6 +27,14 @@ module network
             integer(c_int), value :: enable
             integer(c_int) :: c_set_nonblocking
         end function
+
+        ! Returns: 1 = connected, 0 = pending, -1 = getsockopt failed,
+        !          -N = connection failed with SO_ERROR == N
+        function c_poll_connect(sockfd) bind(C, name="c_poll_connect")
+            import :: c_int
+            integer(c_int), value :: sockfd
+            integer(c_int) :: c_poll_connect
+        end function
     end interface
 
 contains
@@ -241,60 +249,34 @@ contains
         integer, intent(out) :: result
         character(len=*), intent(out) :: error_msg
 
-        integer(c_int), target :: sock_err, optlen
         integer(c_int) :: res
+        integer(c_int), target :: opt_on
 
         error_msg = ' '
         result = 0  ! pending
 
-        ! Try a zero-length connect again — if already connected it
-        ! succeeds; if still pending it fails with EALREADY/WSAEALREADY
-        ! Instead, use getsockopt(SO_ERROR) which is the standard way.
-        optlen = int(c_sizeof(sock_err), c_int)
-        sock_err = 0
-        res = getsockopt(sock_fd, SOL_SOCKET, SO_ERROR, &
-                         c_loc(sock_err), c_loc(optlen))
-        if (res /= 0) then
-            ! getsockopt itself failed — treat as error
-            error_msg = 'Error: connection check failed'
-            call net_close(sock_fd)
-            sock_fd = -1
-            result = -1
-            return
-        end if
+        ! Use the C helper which calls getsockopt(SO_ERROR) + getpeername
+        ! natively, avoiding Fortran ↔ C interop issues with pointer
+        ! arguments that caused failures on Linux.
+        res = c_poll_connect(sock_fd)
 
-        if (sock_err == 0) then
-            ! SO_ERROR == 0 means connected (or never started connecting yet).
-            ! Try a second getsockopt to confirm — if the socket is truly
-            ! connected, getpeername will succeed.
-            block
-                type(sockaddr_in), target :: peer
-                integer(c_int), target :: plen
-                plen = int(c_sizeof(peer), c_int)
-                res = getpeername(sock_fd, c_loc(peer), c_loc(plen))
-            end block
-            if (res == 0) then
-                ! Connected! Restore blocking mode
-                res = c_set_nonblocking(sock_fd, 0_c_int)
-                ! Set TCP_NODELAY
-                block
-                    integer(c_int), target :: opt_on
-                    opt_on = 1_c_int
-                    res = setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &
-                                     c_loc(opt_on), int(c_sizeof(opt_on), c_int))
-                end block
-                result = 1
-            else
-                ! Not yet connected — still pending
-                result = 0
-            end if
-        else if ((is_windows .and. (sock_err == 10035 .or. sock_err == 10037)) .or. &
-                 (.not. is_windows .and. (sock_err == 36 .or. sock_err == 115))) then
-            ! Still in progress (WSAEWOULDBLOCK/WSAEALREADY on Windows, EINPROGRESS on POSIX)
+        if (res == 1) then
+            ! Connected! Restore blocking mode and set TCP_NODELAY
+            res = c_set_nonblocking(sock_fd, 0_c_int)
+            opt_on = 1_c_int
+            res = setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &
+                             c_loc(opt_on), int(c_sizeof(opt_on), c_int))
+            result = 1
+        else if (res == 0) then
+            ! Still pending
             result = 0
         else
-            ! Real error
-            write(error_msg, '(A,I0)') 'Error: connection failed, code=', sock_err
+            ! res < 0: error
+            if (res == -1) then
+                error_msg = 'Error: connection check failed'
+            else
+                write(error_msg, '(A,I0)') 'Error: connection failed, code=', -res
+            end if
             call net_close(sock_fd)
             sock_fd = -1
             result = -1
