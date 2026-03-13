@@ -5,6 +5,19 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g. 1.2.0)'
+        required: true
+        type: string
+      channel:
+        description: 'Release channel'
+        required: true
+        type: choice
+        default: 'stable'
+        options:
+          - stable
+          - alpha
 
 permissions:
   contents: write
@@ -211,14 +224,48 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     steps:
+      - name: Determine version and tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            CHANNEL="${{ github.event.inputs.channel }}"
+          else
+            # Extract version from tag (e.g. v1.2.0 or v1.2.0-alpha)
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+            if echo "$VERSION" | grep -qi 'alpha'; then
+              CHANNEL="alpha"
+              VERSION="$(echo "$VERSION" | sed 's/-alpha//')"
+            else
+              CHANNEL="stable"
+            fi
+          fi
+
+          TAG_NAME="v${VERSION}"
+          if [ "$CHANNEL" = "alpha" ]; then
+            TAG_NAME="v${VERSION}-alpha"
+            RELEASE_NAME="ForPlay v${VERSION} (Alpha)"
+            PRERELEASE=true
+          else
+            RELEASE_NAME="ForPlay v${VERSION}"
+            PRERELEASE=false
+          fi
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_name }}
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
           generate_release_notes: true
           files: |
             windows/forplay-windows-x86_64.zip
