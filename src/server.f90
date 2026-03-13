@@ -459,7 +459,11 @@ contains
                 rooms(i)%num_players = 1
                 rooms(i)%players(1)%fd = host_fd
                 rooms(i)%players(1)%ip = host_ip
-                rooms(i)%players(1)%name = host_name
+                if (len_trim(host_name) == 0 .or. trim(host_name) == 'Player') then
+                    rooms(i)%players(1)%name = 'Player 1'
+                else
+                    rooms(i)%players(1)%name = host_name
+                end if
                 rooms(i)%players(1)%is_host = .true.
                 rooms(i)%in_game = .false.
                 call server_config_defaults(rooms(i)%cfg)
@@ -489,7 +493,11 @@ contains
         rooms(room_idx)%num_players = n
         rooms(room_idx)%players(n)%fd = fd
         rooms(room_idx)%players(n)%ip = ip
-        rooms(room_idx)%players(n)%name = player_name
+        if (len_trim(player_name) == 0 .or. trim(player_name) == 'Player') then
+            write(rooms(room_idx)%players(n)%name, '(A,I0)') 'Player ', n
+        else
+            rooms(room_idx)%players(n)%name = player_name
+        end if
         rooms(room_idx)%players(n)%is_host = .false.
         ok = .true.
     end function
@@ -1027,8 +1035,10 @@ contains
         end block
 
         ! Send game init to both players
-        call server_send_init_to_fd(srv%rooms(ridx)%players(1)%fd, srv%room_gs(ridx), .true., st)
-        call server_send_init_to_fd(srv%rooms(ridx)%players(2)%fd, srv%room_gs(ridx), .true., st)
+        call server_send_init_to_fd(srv%rooms(ridx)%players(1)%fd, srv%room_gs(ridx), &
+                                    .not. srv%rooms(ridx)%cfg%host_hides, st)
+        call server_send_init_to_fd(srv%rooms(ridx)%players(2)%fd, srv%room_gs(ridx), &
+                                    srv%rooms(ridx)%cfg%host_hides, st)
 
         ! Switch clients to game state
         block
@@ -1080,9 +1090,11 @@ contains
             call server_send_action(srv%rooms(ridx)%players(1)%fd, 9, 0)
             call server_send_action(srv%rooms(ridx)%players(2)%fd, 9, 0)
             call server_send_init_to_fd(srv%rooms(ridx)%players(1)%fd, &
-                                        srv%room_gs(ridx), .true., st)
+                                        srv%room_gs(ridx), &
+                                        .not. srv%rooms(ridx)%cfg%host_hides, st)
             call server_send_init_to_fd(srv%rooms(ridx)%players(2)%fd, &
-                                        srv%room_gs(ridx), .true., st)
+                                        srv%room_gs(ridx), &
+                                        srv%rooms(ridx)%cfg%host_hides, st)
             return
         end if
 

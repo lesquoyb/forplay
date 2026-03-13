@@ -468,8 +468,8 @@ contains
 
     subroutine handle_menu_click(mx, my)
         integer, intent(in) :: mx, my
-        if (mx>=250 .and. mx<=550 .and. my>=250 .and. my<=310) call start_hosting()
-        if (mx>=250 .and. mx<=550 .and. my>=350 .and. my<=410) call start_joining()
+        if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. my>=250 .and. my<=310) call start_hosting()
+        if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. my>=350 .and. my<=410) call start_joining()
     end subroutine
 
     subroutine handle_host_click(mx, my)
@@ -495,12 +495,12 @@ contains
 
         ! "Start game" button
         if (client_connected) then
-            if (mx>=250 .and. mx<=550 .and. my>=py .and. my<=py+50) then
+            if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. my>=py .and. my<=py+50) then
                 call launch_game_as_host()
             end if
         end if
         ! "Back" button
-        if (mx>=300 .and. mx<=500 .and. my>=py+60 .and. my<=py+100) call go_back_to_menu()
+        if (mx>=SCREEN_W/2-100 .and. mx<=SCREEN_W/2+100 .and. my>=py+60 .and. my<=py+100) call go_back_to_menu()
 
         total_items = sum(cfg_item_counts)
 
@@ -599,9 +599,10 @@ contains
 
     subroutine handle_join_click(mx, my)
         integer, intent(in) :: mx, my
+        integer :: fx
+        fx = SCREEN_W/2 - 175
         if (connecting) then
-            ! While connecting, only allow "Back" (which cancels)
-            if (mx>=300 .and. mx<=500 .and. my>=500 .and. my<=550) then
+            if (mx>=SCREEN_W/2-100 .and. mx<=SCREEN_W/2+100 .and. my>=500 .and. my<=550) then
                 if (my_socket >= 0) then
                     call net_close(my_socket); my_socket = -1
                 end if
@@ -610,14 +611,14 @@ contains
             end if
             return
         end if
-        if (mx>=250 .and. mx<=600 .and. my>=220 .and. my<=260) then
+        if (mx>=fx .and. mx<=fx+350 .and. my>=220 .and. my<=260) then
             active_field = 0; call c_sdl_start_text_input()
         end if
-        if (mx>=250 .and. mx<=600 .and. my>=310 .and. my<=350) then
+        if (mx>=fx .and. mx<=fx+350 .and. my>=310 .and. my<=350) then
             active_field = 1; call c_sdl_start_text_input()
         end if
-        if (mx>=250 .and. mx<=550 .and. my>=400 .and. my<=450) call attempt_connection()
-        if (mx>=300 .and. mx<=500 .and. my>=500 .and. my<=550) call go_back_to_menu()
+        if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. my>=400 .and. my<=450) call attempt_connection()
+        if (mx>=SCREEN_W/2-100 .and. mx<=SCREEN_W/2+100 .and. my>=500 .and. my<=550) call go_back_to_menu()
     end subroutine
 
     ! =====================================================================
@@ -1268,8 +1269,8 @@ contains
         call draw_text_centered('ForPlay', title_font, COL_CYAN, SCREEN_W/2, 80)
         call draw_text_centered('Choose an option', sml_font, COL_GRAY, &
                                 SCREEN_W/2, 170)
-        call draw_button(250, 250, 300, 60, 'Host a game', COL_GREEN)
-        call draw_button(250, 350, 300, 60, 'Join a game', COL_CYAN)
+        call draw_button(SCREEN_W/2 - 150, 250, 300, 60, 'Host a game', COL_GREEN)
+        call draw_button(SCREEN_W/2 - 150, 350, 300, 60, 'Join a game', COL_CYAN)
         if (len_trim(error_message)>0) &
             call draw_text_centered(trim(error_message), sml_font, COL_RED, &
                                     SCREEN_W/2, 470)
@@ -1361,9 +1362,9 @@ contains
         ! Buttons
         py = max(ly, ry) + 10
         if (client_connected) then
-            call draw_button(250, py, 300, 50, 'Start game', COL_GREEN)
+            call draw_button(SCREEN_W/2 - 150, py, 300, 50, 'Start game', COL_GREEN)
         end if
-        call draw_button(300, py + 60, 200, 40, 'Back', COL_RED)
+        call draw_button(SCREEN_W/2 - 100, py + 60, 200, 40, 'Back', COL_RED)
     end subroutine
 
     subroutine draw_param_row_at(x_base, y, label, val)
@@ -1513,23 +1514,25 @@ contains
     ! --- Join ---
     subroutine render_join()
         character(len=80) :: dt
+        integer :: fx
+        fx = SCREEN_W/2 - 175
         call draw_text_centered('Join a game', big_font, COL_CYAN, &
                                 SCREEN_W/2, 60)
-        call draw_text_at(sml_font, 'IP Address:', COL_WHITE, 250, 195)
+        call draw_text_at(sml_font, 'IP Address:', COL_WHITE, fx, 195)
         dt = ' '; if (len_trim(input_ip)>0) dt = trim(input_ip)
-        call draw_input_field(250, 220, 350, 40, trim(dt), active_field==0)
-        call draw_text_at(sml_font, 'Port:', COL_WHITE, 250, 285)
+        call draw_input_field(fx, 220, 350, 40, trim(dt), active_field==0)
+        call draw_text_at(sml_font, 'Port:', COL_WHITE, fx, 285)
         dt = ' '; if (len_trim(input_port)>0) dt = trim(input_port)
-        call draw_input_field(250, 310, 350, 40, trim(dt), active_field==1)
+        call draw_input_field(fx, 310, 350, 40, trim(dt), active_field==1)
         if (connecting) then
-            call draw_button(250, 400, 300, 50, 'Connecting...', COL_GRAY)
+            call draw_button(SCREEN_W/2 - 150, 400, 300, 50, 'Connecting...', COL_GRAY)
         else
-            call draw_button(250, 400, 300, 50, 'Connect', COL_GREEN)
+            call draw_button(SCREEN_W/2 - 150, 400, 300, 50, 'Connect', COL_GREEN)
         end if
         if (len_trim(error_message)>0) &
             call draw_text_centered(trim(error_message), sml_font, COL_RED, &
                                     SCREEN_W/2, 470)
-        call draw_button(300, 500, 200, 50, 'Back', COL_RED)
+        call draw_button(SCREEN_W/2 - 100, 500, 200, 50, 'Back', COL_RED)
     end subroutine
 
     ! =====================================================================
@@ -2366,11 +2369,13 @@ contains
     ! --- Lobby click handling ---
     subroutine handle_lobby_click(mx, my)
         integer, intent(in) :: mx, my
-        integer :: i, ry
+        integer :: i, ry, ox
+
+        ox = (SCREEN_W - 800) / 2
 
         if (lobby_creating) then
-            ! "Create" confirm button: (250, 480, 300, 40)
-            if (mx>=250 .and. mx<=550 .and. my>=480 .and. my<=520) then
+            ! "Create" confirm button
+            if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. my>=480 .and. my<=520) then
                 if (len_trim(lobby_room_name_input) > 0) then
                     call send_create_room(trim(lobby_room_name_input), trim(lobby_player_name))
                     room_i_am_host = .true.
@@ -2378,20 +2383,20 @@ contains
                 end if
                 return
             end if
-            ! "Cancel" button: (300, 530, 200, 35)
-            if (mx>=300 .and. mx<=500 .and. my>=530 .and. my<=565) then
+            ! "Cancel" button
+            if (mx>=SCREEN_W/2-100 .and. mx<=SCREEN_W/2+100 .and. my>=530 .and. my<=565) then
                 lobby_creating = .false.
                 call c_sdl_stop_text_input()
                 return
             end if
-            ! Player name field: (250, 420, 300, 35)
-            if (mx>=250 .and. mx<=550 .and. my>=420 .and. my<=455) then
+            ! Player name field
+            if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. my>=420 .and. my<=455) then
                 active_field = 10  ! player name
                 call c_sdl_start_text_input()
                 return
             end if
-            ! Room name field: (250, 360, 300, 35)
-            if (mx>=250 .and. mx<=550 .and. my>=360 .and. my<=395) then
+            ! Room name field
+            if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. my>=360 .and. my<=395) then
                 active_field = 11  ! room name
                 call c_sdl_start_text_input()
                 return
@@ -2399,8 +2404,8 @@ contains
             return
         end if
 
-        ! "Create room" button: (250, 160, 150, 40)
-        if (mx>=250 .and. mx<=400 .and. my>=160 .and. my<=200) then
+        ! "Create room" button
+        if (mx>=SCREEN_W/2-160 .and. mx<=SCREEN_W/2-10 .and. my>=160 .and. my<=200) then
             lobby_creating = .true.
             lobby_room_name_input = ' '
             active_field = 11  ! room name first
@@ -2408,23 +2413,23 @@ contains
             return
         end if
 
-        ! "Refresh" button: (450, 160, 150, 40)
-        if (mx>=450 .and. mx<=600 .and. my>=160 .and. my<=200) then
+        ! "Refresh" button
+        if (mx>=SCREEN_W/2+10 .and. mx<=SCREEN_W/2+160 .and. my>=160 .and. my<=200) then
             call send_list_rooms_request()
             return
         end if
 
-        ! "Back" button: (300, 540, 200, 40)
-        if (mx>=300 .and. mx<=500 .and. my>=540 .and. my<=580) then
+        ! "Back" button
+        if (mx>=SCREEN_W/2-100 .and. mx<=SCREEN_W/2+100 .and. my>=540 .and. my<=580) then
             call go_back_to_menu()
             return
         end if
 
-        ! Room list: each room row is 40px tall starting at y=250
+        ! Room list: each room row is 45px tall starting at y=250
         do i = 1, lobby_num_rooms
             ry = 250 + (i-1) * 45
-            ! "Join" button for this room: (620, ry+5, 80, 30)
-            if (mx>=620 .and. mx<=700 .and. my>=ry+5 .and. my<=ry+35) then
+            ! "Join" button for this room
+            if (mx>=620+ox .and. mx<=700+ox .and. my>=ry+5 .and. my<=ry+35) then
                 if (.not. lobby_room_ingame(i) .and. lobby_room_nplayers(i) < 2) then
                     call send_join_room(lobby_room_ids(i), trim(lobby_player_name))
                     room_i_am_host = .false.
@@ -2499,8 +2504,10 @@ contains
 
     ! --- Render lobby page ---
     subroutine render_lobby()
-        integer :: i, ry
+        integer :: i, ry, ox
         character(len=80) :: info
+
+        ox = (SCREEN_W - 800) / 2
 
         call draw_text_centered('Server Lobby', big_font, COL_CYAN, SCREEN_W/2, 20)
         call draw_text_centered('Choose a room to join or create one', &
@@ -2508,26 +2515,26 @@ contains
 
         ! Player name display
         write(info, '(A,A)') 'Player: ', trim(lobby_player_name)
-        call draw_text_at(sml_font, trim(info), COL_WHITE, 20, 110)
+        call draw_text_at(sml_font, trim(info), COL_WHITE, 20 + ox, 110)
 
         if (lobby_creating) then
             ! --- Create room form ---
             call draw_text_centered('Create a Room', big_font, COL_YELLOW, SCREEN_W/2, 280)
-            call draw_text_at(sml_font, 'Room name:', COL_WHITE, 250, 340)
-            call draw_input_field(250, 360, 300, 35, trim(lobby_room_name_input), active_field==11)
-            call draw_text_at(sml_font, 'Your name:', COL_WHITE, 250, 400)
-            call draw_input_field(250, 420, 300, 35, trim(lobby_player_name), active_field==10)
-            call draw_button(250, 480, 300, 40, 'Create', COL_GREEN)
-            call draw_button(300, 530, 200, 35, 'Cancel', COL_RED)
+            call draw_text_at(sml_font, 'Room name:', COL_WHITE, SCREEN_W/2 - 150, 340)
+            call draw_input_field(SCREEN_W/2 - 150, 360, 300, 35, trim(lobby_room_name_input), active_field==11)
+            call draw_text_at(sml_font, 'Your name:', COL_WHITE, SCREEN_W/2 - 150, 400)
+            call draw_input_field(SCREEN_W/2 - 150, 420, 300, 35, trim(lobby_player_name), active_field==10)
+            call draw_button(SCREEN_W/2 - 150, 480, 300, 40, 'Create', COL_GREEN)
+            call draw_button(SCREEN_W/2 - 100, 530, 200, 35, 'Cancel', COL_RED)
         else
             ! --- Room list ---
-            call draw_button(250, 160, 150, 40, 'Create room', COL_GREEN)
-            call draw_button(450, 160, 150, 40, 'Refresh', COL_CYAN)
+            call draw_button(SCREEN_W/2 - 160, 160, 150, 40, 'Create room', COL_GREEN)
+            call draw_button(SCREEN_W/2 + 10, 160, 150, 40, 'Refresh', COL_CYAN)
 
             ! Column headers
-            call draw_text_at(sml_font, 'Room', COL_GRAY, 100, 225)
-            call draw_text_at(sml_font, 'Players', COL_GRAY, 460, 225)
-            call draw_text_at(sml_font, 'Status', COL_GRAY, 540, 225)
+            call draw_text_at(sml_font, 'Room', COL_GRAY, 100 + ox, 225)
+            call draw_text_at(sml_font, 'Players', COL_GRAY, 460 + ox, 225)
+            call draw_text_at(sml_font, 'Status', COL_GRAY, 540 + ox, 225)
 
             if (lobby_num_rooms == 0) then
                 call draw_text_centered('No rooms available', sml_font, &
@@ -2537,28 +2544,28 @@ contains
                     ry = 250 + (i-1) * 45
                     ! Room name
                     call draw_text_at(sml_font, trim(lobby_room_names(i)), &
-                                      COL_WHITE, 100, ry + 10)
+                                      COL_WHITE, 100 + ox, ry + 10)
                     ! Player count
                     write(info, '(I0,A)') lobby_room_nplayers(i), '/2'
-                    call draw_text_at(sml_font, trim(info), COL_YELLOW, 470, ry + 10)
+                    call draw_text_at(sml_font, trim(info), COL_YELLOW, 470 + ox, ry + 10)
                     ! Status
                     if (lobby_room_ingame(i)) then
-                        call draw_text_at(sml_font, 'In game', COL_RED, 540, ry + 10)
+                        call draw_text_at(sml_font, 'In game', COL_RED, 540 + ox, ry + 10)
                     else if (lobby_room_nplayers(i) >= 2) then
-                        call draw_text_at(sml_font, 'Full', COL_ORANGE, 540, ry + 10)
+                        call draw_text_at(sml_font, 'Full', COL_ORANGE, 540 + ox, ry + 10)
                     else
-                        call draw_text_at(sml_font, 'Open', COL_GREEN, 540, ry + 10)
-                        call draw_button(620, ry+5, 80, 30, 'Join', COL_GREEN)
+                        call draw_text_at(sml_font, 'Open', COL_GREEN, 540 + ox, ry + 10)
+                        call draw_button(620 + ox, ry+5, 80, 30, 'Join', COL_GREEN)
                     end if
 
                     ! Separator line
                     rc = sdl_set_render_draw_color(main_renderer, &
                             uint8(60), uint8(60), uint8(70), uint8(255))
-                    rc = sdl_render_draw_line(main_renderer, 80, ry+40, 720, ry+40)
+                    rc = sdl_render_draw_line(main_renderer, 80 + ox, ry+40, 720 + ox, ry+40)
                 end do
             end if
 
-            call draw_button(300, 540, 200, 40, 'Back', COL_RED)
+            call draw_button(SCREEN_W/2 - 100, 540, 200, 40, 'Back', COL_RED)
         end if
 
         if (len_trim(error_message) > 0) &
@@ -2575,8 +2582,8 @@ contains
         integer, intent(in) :: mx, my
         integer :: total_items
 
-        ! "Leave" button: (300, 540, 200, 40)
-        if (mx>=300 .and. mx<=500 .and. my>=540 .and. my<=580) then
+        ! "Leave" button
+        if (mx>=SCREEN_W/2-100 .and. mx<=SCREEN_W/2+100 .and. my>=540 .and. my<=580) then
             call send_leave_room()
             room_my_id = 0
             if (hosting_with_server) then
@@ -2588,9 +2595,9 @@ contains
             return
         end if
 
-        ! "Start game" button (host only): (250, 480, 300, 50)
+        ! "Start game" button (host only)
         if (room_i_am_host .and. room_num_players >= 2) then
-            if (mx>=250 .and. mx<=550 .and. my>=480 .and. my<=530) then
+            if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. my>=480 .and. my<=530) then
                 call send_start_game_request()
                 return
             end if
@@ -2626,45 +2633,38 @@ contains
             if (mx >= 315 .and. mx <= 337) room_cfg%branch_pct = min(50, room_cfg%branch_pct + 1)
             call send_config_change(); return
         end if
-        ! Row: Host hides toggle (y=288)
-        if (my >= 275 .and. my <= 301) then
-            if (mx >= 240 .and. mx <= 300) then
-                room_cfg%host_hides = .not. room_cfg%host_hides
-                call send_config_change(); return
-            end if
-        end if
 
-        ! -- Bonuses block rows --
-        ! Row: Nb Dash (y=358)
-        if (my >= 345 .and. my <= 371) then
+        ! -- Bonuses block rows (shifted up since Host hides removed) --
+        ! Row: Nb Dash (y=332)
+        if (my >= 319 .and. my <= 345) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_DASH) = max(0, room_cfg%item_counts(ITEM_DASH) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_DASH) = room_cfg%item_counts(ITEM_DASH) + 1
             call send_config_change(); return
         end if
-        ! Row: Nb Vision (y=384)
-        if (my >= 371 .and. my <= 397) then
+        ! Row: Nb Vision (y=358)
+        if (my >= 345 .and. my <= 371) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_VISION) = max(0, room_cfg%item_counts(ITEM_VISION) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_VISION) = room_cfg%item_counts(ITEM_VISION) + 1
             call send_config_change(); return
         end if
-        ! Row: Nb Light (y=410)
-        if (my >= 397 .and. my <= 423) then
+        ! Row: Nb Light (y=384)
+        if (my >= 371 .and. my <= 397) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_ILLUMINATE) = max(0, room_cfg%item_counts(ITEM_ILLUMINATE) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_ILLUMINATE) = room_cfg%item_counts(ITEM_ILLUMINATE) + 1
             call send_config_change(); return
         end if
-        ! Row: Nb Speed (y=436)
-        if (my >= 423 .and. my <= 449) then
+        ! Row: Nb Speed (y=410)
+        if (my >= 397 .and. my <= 423) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_SPEED) = max(0, room_cfg%item_counts(ITEM_SPEED) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_SPEED) = room_cfg%item_counts(ITEM_SPEED) + 1
             call send_config_change(); return
         end if
-        ! Row: Nb Pickaxe (y=462)
-        if (my >= 449 .and. my <= 475) then
+        ! Row: Nb Pickaxe (y=436)
+        if (my >= 423 .and. my <= 449) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_WALL_BREAK) = max(0, room_cfg%item_counts(ITEM_WALL_BREAK) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_WALL_BREAK) = room_cfg%item_counts(ITEM_WALL_BREAK) + 1
@@ -2713,6 +2713,19 @@ contains
                 call send_config_change(); return
             end if
         end if
+
+        ! ===== Player role toggle (right column, y starts at 436) =====
+        ! Role buttons at x=670..750, each row is 28px apart
+        if (mx >= 670 .and. mx <= 750) then
+            if (room_num_players >= 1 .and. my >= 433 .and. my <= 455) then
+                room_cfg%host_hides = .not. room_cfg%host_hides
+                call send_config_change(); return
+            end if
+            if (room_num_players >= 2 .and. my >= 461 .and. my <= 483) then
+                room_cfg%host_hides = .not. room_cfg%host_hides
+                call send_config_change(); return
+            end if
+        end if
     end subroutine
 
     ! --- Room keyboard ---
@@ -2748,7 +2761,6 @@ contains
         call draw_param_row_at(20, ly, 'Height',    room_cfg%maze_h);  ly = ly + 26
         call draw_param_row_at(20, ly, 'Min dist.', room_cfg%min_dist); ly = ly + 26
         call draw_param_row_at(20, ly, 'Branch %',  room_cfg%branch_pct); ly = ly + 26
-        call draw_toggle_row_at(20, ly, 'Host hides', room_cfg%host_hides); ly = ly + 26
 
         ly = ly + 8
         call draw_text_at(sml_font, '--- Bonuses ---', COL_GRAY, 20, ly)
@@ -2794,13 +2806,28 @@ contains
         rc = sdl_render_draw_line(main_renderer, 410, ry, 770, ry)
         ry = ry + 10
         do i = 1, room_num_players
+            ! Player name
             if (room_player_is_host(i)) then
                 write(info, '(A,A,A)') trim(room_player_names(i)), ' ', '(host)'
                 call draw_text_at(sml_font, trim(info), COL_YELLOW, 420, ry)
             else
                 call draw_text_at(sml_font, trim(room_player_names(i)), COL_WHITE, 420, ry)
             end if
-            ry = ry + 22
+            ! Role button
+            if (i == 1) then
+                if (room_cfg%host_hides) then
+                    call draw_button(670, ry - 3, 80, 22, 'Hider', COL_GREEN)
+                else
+                    call draw_button(670, ry - 3, 80, 22, 'Seeker', COL_CYAN)
+                end if
+            else
+                if (room_cfg%host_hides) then
+                    call draw_button(670, ry - 3, 80, 22, 'Seeker', COL_CYAN)
+                else
+                    call draw_button(670, ry - 3, 80, 22, 'Hider', COL_GREEN)
+                end if
+            end if
+            ry = ry + 28
         end do
 
         if (.not. room_i_am_host) then
@@ -2822,11 +2849,11 @@ contains
 
         ! Start button (host only, 2 players)
         if (room_i_am_host .and. room_num_players >= 2) then
-            call draw_button(250, 480, 300, 50, 'Start game', COL_GREEN)
+            call draw_button(SCREEN_W/2 - 150, 480, 300, 50, 'Start game', COL_GREEN)
         end if
 
         ! Leave button
-        call draw_button(300, 540, 200, 40, 'Leave', COL_RED)
+        call draw_button(SCREEN_W/2 - 100, 540, 200, 40, 'Leave', COL_RED)
     end subroutine
 
     function int_to_str(n) result(s)

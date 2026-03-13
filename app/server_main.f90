@@ -351,9 +351,11 @@ contains
         end block
 
         ! Send game init to both players
-        ! Player 1 (host) = hider by default (host_hides=true)
-        call server_send_init_to_fd(rooms(ridx)%players(1)%fd, room_gs(ridx), .true., st)
-        call server_send_init_to_fd(rooms(ridx)%players(2)%fd, room_gs(ridx), .true., st)
+        ! Player 1 (host): receives .not. host_hides so am_hider = host_hides
+        call server_send_init_to_fd(rooms(ridx)%players(1)%fd, room_gs(ridx), &
+                                    .not. rooms(ridx)%cfg%host_hides, st)
+        call server_send_init_to_fd(rooms(ridx)%players(2)%fd, room_gs(ridx), &
+                                    rooms(ridx)%cfg%host_hides, st)
 
         ! Switch all room clients to game state
         block
@@ -407,9 +409,11 @@ contains
             call server_send_action(rooms(ridx)%players(1)%fd, 9, 0)
             call server_send_action(rooms(ridx)%players(2)%fd, 9, 0)
             call server_send_init_to_fd(rooms(ridx)%players(1)%fd, &
-                                        room_gs(ridx), .true., st)
+                                        room_gs(ridx), &
+                                        .not. rooms(ridx)%cfg%host_hides, st)
             call server_send_init_to_fd(rooms(ridx)%players(2)%fd, &
-                                        room_gs(ridx), .true., st)
+                                        room_gs(ridx), &
+                                        rooms(ridx)%cfg%host_hides, st)
             return
         end if
 
