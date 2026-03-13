@@ -18,3 +18,9 @@ fortran-socket = { path = "deps/fortran-socket" }
 name = "forplay"
 source-dir = "app"
 main = "main.f90"
+
+[[executable]]
+name = "forplay-server"
+source-dir = "app"
+main = "server_main.f90"
+link = ["ws2_32"]

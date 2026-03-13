@@ -16,17 +16,18 @@ program forplay
     use :: maze_mod
     use :: game_mod
     use :: network
+    use :: server_mod
     implicit none
 
     ! --- Constants ---
-    integer, parameter :: SCREEN_W      = 800
-    integer, parameter :: SCREEN_H      = 600
+    integer :: SCREEN_W      = 1024
+    integer :: SCREEN_H      = 768
     integer, parameter :: TITLE_FONT_SZ = 48
     integer, parameter :: MAIN_FONT_SZ  = 24
     integer, parameter :: SML_FONT_SZ   = 14
     integer, parameter :: DEFAULT_PORT  = 12345
     integer, parameter :: HUD_H         = 90
-    integer, parameter :: GAME_AREA_H   = SCREEN_H - HUD_H  ! 510
+    integer :: GAME_AREA_H   = 768 - 90  ! SCREEN_H - HUD_H
     integer, parameter :: DEFAULT_MAZE_W = 21
     integer, parameter :: DEFAULT_MAZE_H = 15
     integer, parameter :: DEFAULT_ITEM_DASH_COUNT       = 3
@@ -42,10 +43,12 @@ program forplay
     integer, parameter :: WALL_THICK    = 2
 
     ! Page identifiers
-    integer, parameter :: PAGE_MENU = 0
-    integer, parameter :: PAGE_HOST = 1
-    integer, parameter :: PAGE_JOIN = 2
-    integer, parameter :: PAGE_GAME = 3
+    integer, parameter :: PAGE_MENU  = 0
+    integer, parameter :: PAGE_HOST  = 1
+    integer, parameter :: PAGE_JOIN  = 2
+    integer, parameter :: PAGE_GAME  = 3
+    integer, parameter :: PAGE_LOBBY = 4
+    integer, parameter :: PAGE_ROOM  = 5
 
     ! Colors
     type(sdl_color) :: COL_WHITE, COL_BLACK, COL_GREEN, COL_RED
@@ -92,6 +95,7 @@ program forplay
     logical :: game_ready        ! .true. once init data exchanged
 
     ! Game parameters (configurable by host before launch)
+    type(server_config) :: cfg
     integer :: cfg_maze_w, cfg_maze_h, cfg_min_dist
     integer :: cfg_item_counts(NUM_ITEM_TYPES)
     integer :: cfg_speed_h, cfg_speed_s
@@ -103,11 +107,39 @@ program forplay
     ! Modal / end-game state
     logical :: show_quit_modal     ! confirmation dialog visible
     logical :: game_ended          ! game ended (quit or win), map revealed
+    logical :: game_ended_by_quit  ! .true. if game ended by quit (not natural)
     character(len=128) :: endgame_msg  ! message to show on end screen
 
     ! Persistent buffer for receiving game init data
     integer(c_int8_t) :: recv_init_buf(2048)
     integer :: recv_init_pos
+
+    ! Lobby message receive buffer
+    integer(c_int8_t) :: lobby_recv_buf(4096)
+    integer :: lobby_recv_pos
+
+    ! Lobby state (room list)
+    integer, parameter :: MAX_LOBBY_ROOMS = 10
+    integer :: lobby_room_ids(MAX_LOBBY_ROOMS)
+    character(len=32) :: lobby_room_names(MAX_LOBBY_ROOMS)
+    integer :: lobby_room_nplayers(MAX_LOBBY_ROOMS)
+    logical :: lobby_room_ingame(MAX_LOBBY_ROOMS)
+    integer :: lobby_num_rooms
+    logical :: lobby_creating       ! are we showing the create-room input?
+    character(len=32) :: lobby_room_name_input
+    character(len=32) :: lobby_player_name
+
+    ! Room state (inside a room)
+    integer :: room_my_id              ! which room we're in (server-side ID)
+    type(server_config) :: room_cfg    ! current room config (from server)
+    character(len=32) :: room_player_names(MAX_ROOM_PLAYERS)
+    logical :: room_player_is_host(MAX_ROOM_PLAYERS)
+    integer :: room_num_players
+    logical :: room_i_am_host
+
+    ! Embedded server (used when hosting via "Host a game")
+    type(emb_server_type) :: emb_srv
+    logical :: hosting_with_server = .false.
 
     ! SDL text input
     interface
@@ -144,7 +176,7 @@ program forplay
 
     main_window = sdl_create_window('ForPlay' // c_null_char, &
                     SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, &
-                    SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN)
+                    SCREEN_W, SCREEN_H, ior(SDL_WINDOW_SHOWN, SDL_WINDOW_RESIZABLE))
     if (.not. c_associated(main_window)) stop 'Window creation failed'
 
     main_renderer = sdl_create_renderer(main_window, -1, SDL_RENDERER_ACCELERATED)
@@ -203,7 +235,18 @@ program forplay
     cfg_branch_pct    = 5
     show_quit_modal   = .false.
     game_ended        = .false.
+    game_ended_by_quit = .false.
     endgame_msg       = ' '
+
+    ! Lobby / room state
+    lobby_recv_pos    = 0
+    lobby_num_rooms   = 0
+    lobby_creating    = .false.
+    lobby_room_name_input = ' '
+    lobby_player_name = 'Player'
+    room_my_id        = 0
+    room_num_players  = 0
+    room_i_am_host    = .false.
 
     ! ---- Main loop ----
     do while (is_running)
@@ -211,15 +254,19 @@ program forplay
             call handle_event(event)
         end do
 
-        ! Async server accept
-        if (current_page == PAGE_HOST .and. waiting_for_client &
-            .and. .not. client_connected) then
-            call check_for_client()
+        ! Tick the embedded server if active
+        if (hosting_with_server) then
+            call emb_server_tick(emb_srv)
         end if
 
-        ! Async client connect
-        if (current_page == PAGE_JOIN .and. connecting) then
+        ! Async client connect (join page or self-connect during hosting)
+        if (connecting) then
             call poll_connection()
+        end if
+
+        ! Lobby/room: poll for lobby messages
+        if (current_page == PAGE_LOBBY .or. current_page == PAGE_ROOM) then
+            call poll_lobby_messages()
         end if
 
         ! Game: always poll for opponent actions (quit can arrive at any time)
@@ -393,6 +440,14 @@ contains
             case (SDL_TEXTINPUT)
                 if (current_page == PAGE_JOIN) &
                     call handle_text_input(ev%text%text)
+                if (current_page == PAGE_LOBBY) &
+                    call handle_lobby_text_input(ev%text%text)
+            case (SDL_WINDOWEVENT)
+                if (ev%window%event == SDL_WINDOWEVENT_SIZE_CHANGED) then
+                    SCREEN_W    = ev%window%data1
+                    SCREEN_H    = ev%window%data2
+                    GAME_AREA_H = SCREEN_H - HUD_H
+                end if
         end select
     end subroutine
 
@@ -402,10 +457,12 @@ contains
     subroutine handle_click(mx, my)
         integer, intent(in) :: mx, my
         select case (current_page)
-            case (PAGE_MENU); call handle_menu_click(mx, my)
-            case (PAGE_HOST); call handle_host_click(mx, my)
-            case (PAGE_JOIN); call handle_join_click(mx, my)
-            case (PAGE_GAME); call handle_game_click(mx, my)
+            case (PAGE_MENU);  call handle_menu_click(mx, my)
+            case (PAGE_HOST);  call handle_host_click(mx, my)
+            case (PAGE_JOIN);  call handle_join_click(mx, my)
+            case (PAGE_GAME);  call handle_game_click(mx, my)
+            case (PAGE_LOBBY); call handle_lobby_click(mx, my)
+            case (PAGE_ROOM);  call handle_room_click(mx, my)
         end select
     end subroutine
 
@@ -418,6 +475,16 @@ contains
     subroutine handle_host_click(mx, my)
         integer, intent(in) :: mx, my
         integer :: py, total_items, ly, ry
+
+        ! Simplified handling when hosting with embedded server
+        if (hosting_with_server) then
+            ! Cancel button: centered at (SCREEN_W/2-100, 340, 200, 40)
+            if (mx >= SCREEN_W/2-100 .and. mx <= SCREEN_W/2+100 .and. &
+                my >= 340 .and. my <= 380) then
+                call go_back_to_menu()
+            end if
+            return
+        end if
 
         ! Compute button Y to match render_host
         ! Left: General 4 rows at 224,250,276,302; Bonuses header+sep; 4 rows at 374,400,426,452
@@ -566,6 +633,10 @@ contains
                 if (sym == SDLK_ESCAPE) call go_back_to_menu()
             case (PAGE_GAME)
                 call handle_game_keys(sym)
+            case (PAGE_LOBBY)
+                call handle_lobby_keys(sym)
+            case (PAGE_ROOM)
+                call handle_room_keys(sym)
         end select
     end subroutine
 
@@ -744,20 +815,52 @@ contains
     end subroutine
 
     ! =====================================================================
+    ! Sync UI config variables into the server_config struct
+    ! =====================================================================
+    subroutine sync_cfg_to_server_config()
+        cfg%maze_w      = cfg_maze_w
+        cfg%maze_h      = cfg_maze_h
+        cfg%min_dist    = cfg_min_dist
+        cfg%item_counts = cfg_item_counts
+        cfg%speed_h     = cfg_speed_h
+        cfg%speed_s     = cfg_speed_s
+        cfg%vision_h    = cfg_vision_h
+        cfg%vision_s    = cfg_vision_s
+        cfg%reveal_h    = cfg_reveal_h
+        cfg%reveal_s    = cfg_reveal_s
+        cfg%host_hides  = cfg_host_hides
+        cfg%branch_pct  = cfg_branch_pct
+    end subroutine
+
+    ! =====================================================================
     ! Page transitions
     ! =====================================================================
     subroutine start_hosting()
         integer(c_int16_t) :: pv
         character(len=256) :: err
+
         pv = int(DEFAULT_PORT, c_int16_t)
-        call net_start_server(pv, server_fd, err)
+        call server_start(pv, server_fd, local_ip, err)
         if (server_fd < 0) then; error_message = err; return; end if
-        call net_get_local_ip(local_ip)
-        client_connected  = .false.
-        waiting_for_client = .true.
-        client_ip         = ' '
-        error_message     = ' '
-        current_page      = PAGE_HOST
+
+        ! Initialize the embedded server
+        call emb_server_init(emb_srv, server_fd)
+        hosting_with_server = .true.
+
+        ! Self-connect to localhost
+        call net_begin_connect('127.0.0.1', pv, my_socket, err)
+        if (my_socket < 0) then
+            error_message = err
+            call emb_server_shutdown(emb_srv)
+            hosting_with_server = .false.
+            server_fd = -1
+            return
+        end if
+
+        connecting = .true.
+        connect_start_tick = sdl_get_ticks()
+        error_message = ' '
+        current_page = PAGE_HOST
     end subroutine
 
     subroutine start_joining()
@@ -768,7 +871,18 @@ contains
     end subroutine
 
     subroutine go_back_to_menu()
+        ! Shut down embedded server if active (closes listen socket + all server-side client fds)
+        if (hosting_with_server) then
+            call emb_server_shutdown(emb_srv)
+            hosting_with_server = .false.
+            server_fd = -1  ! already closed by emb_server_shutdown
+        end if
         if (server_fd >= 0) then; call net_close(server_fd); server_fd = -1; end if
+        ! Close client sockets (game_fd may alias my_socket, avoid double-close)
+        if (game_fd >= 0 .and. game_fd /= my_socket .and. game_fd /= client_fd) then
+            call net_close(game_fd)
+        end if
+        game_fd = -1
         if (client_fd >= 0) then; call net_close(client_fd); client_fd = -1; end if
         if (my_socket >= 0) then; call net_close(my_socket); my_socket = -1; end if
         waiting_for_client = .false.
@@ -778,6 +892,7 @@ contains
         game_ready         = .false.
         gs%initialized     = .false.
         game_ended         = .false.
+        game_ended_by_quit = .false.
         show_quit_modal    = .false.
         endgame_msg        = ' '
         current_page       = PAGE_MENU
@@ -821,10 +936,23 @@ contains
             game_ready = .false.
             gs%initialized = .false.
             recv_init_pos = 0
+            lobby_recv_pos = 0
+            lobby_num_rooms = 0
+            lobby_creating = .false.
             error_message = ' '
-            current_page  = PAGE_GAME
-            print *, '[CLIENT] connected, game_fd=', game_fd, ' waiting for init'
             call c_sdl_stop_text_input()
+
+            if (hosting_with_server) then
+                ! Auto-create a room and go to lobby (will switch to PAGE_ROOM on update)
+                room_i_am_host = .true.
+                call send_create_room('Game', trim(lobby_player_name))
+                current_page = PAGE_LOBBY
+                print *, '[HOST] self-connected, auto-creating room'
+            else
+                current_page = PAGE_LOBBY
+                print *, '[CLIENT] connected, game_fd=', game_fd, ' entering lobby'
+                call send_list_rooms_request()
+            end if
         else if (res == -1) then
             ! Failed
             connecting = .false.
@@ -844,7 +972,7 @@ contains
 
     subroutine check_for_client()
         logical :: got_one
-        call net_try_accept_nonblocking(server_fd, client_fd, client_ip, got_one)
+        call server_try_accept(server_fd, client_fd, client_ip, got_one)
         if (got_one) then
             client_connected   = .true.
             waiting_for_client = .false.
@@ -861,19 +989,53 @@ contains
         if (.not. game_ended) return
         hud_y = GAME_AREA_H
 
-        ! "Back to menu" button in HUD: (15, hud_y+45, 170, 35)
-        if (mx >= 15 .and. mx <= 185 .and. &
-            my >= hud_y+45 .and. my <= hud_y+80) then
-            call go_back_to_menu()
-            return
-        end if
-
-        ! "New game" button in HUD: (200, hud_y+45, 190, 35) — host only
-        if (am_host) then
-            if (mx >= 200 .and. mx <= 390 .and. &
+        if (game_ended_by_quit) then
+            ! Quit scenario: only "Back to room" or "Back to menu"
+            ! "Back to room" button: (15, hud_y+45, 190, 35)
+            if (mx >= 15 .and. mx <= 205 .and. &
                 my >= hud_y+45 .and. my <= hud_y+80) then
-                call restart_game()
+                game_ended = .false.
+                game_ready = .false.
+                gs%initialized = .false.
+                lobby_recv_pos = 0
+                current_page = PAGE_ROOM
                 return
+            end if
+            ! "Back to menu" button: (220, hud_y+45, 190, 35)
+            if (mx >= 220 .and. mx <= 410 .and. &
+                my >= hud_y+45 .and. my <= hud_y+80) then
+                call go_back_to_menu()
+                return
+            end if
+        else
+            ! Natural game over: role-dependent buttons
+            if (room_i_am_host) then
+                ! Host: "Replay" button: (15, hud_y+45, 150, 35)
+                if (mx >= 15 .and. mx <= 165 .and. &
+                    my >= hud_y+45 .and. my <= hud_y+80) then
+                    call send_action(9, 0)
+                    return
+                end if
+                ! Host: "Back to room" button: (180, hud_y+45, 190, 35)
+                if (mx >= 180 .and. mx <= 370 .and. &
+                    my >= hud_y+45 .and. my <= hud_y+80) then
+                    call send_action(10, 0)
+                    return
+                end if
+            else
+                ! Non-host: "Leave" button: (15, hud_y+45, 150, 35)
+                if (mx >= 15 .and. mx <= 165 .and. &
+                    my >= hud_y+45 .and. my <= hud_y+80) then
+                    call send_action(11, 0)
+                    game_ended = .false.
+                    game_ready = .false.
+                    gs%initialized = .false.
+                    lobby_recv_pos = 0
+                    lobby_num_rooms = 0
+                    current_page = PAGE_LOBBY
+                    call send_list_rooms_request()
+                    return
+                end if
             end if
         end if
     end subroutine
@@ -892,6 +1054,7 @@ contains
         gs%s_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
         gs%game_over = .true.
         game_ended   = .true.
+        game_ended_by_quit = .true.
         endgame_msg  = 'Game abandoned'
     end subroutine
 
@@ -905,6 +1068,7 @@ contains
         gs%h_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
         gs%s_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
         game_ended = .true.
+        game_ended_by_quit = .false.
         if (gs%seeker_won) then
             endgame_msg = 'The seeker wins!'
         else
@@ -916,18 +1080,37 @@ contains
     ! Try receiving end/restart messages when in end-game state
     ! =====================================================================
     subroutine try_recv_end_message()
-        integer(c_int8_t), target :: msg(2)
-        integer(c_int) :: got
+        integer :: atype, param
+        logical :: got
 
-        call net_try_recv_bytes(game_fd, msg, 2_c_int, got)
-        if (got < 2) return
+        call server_try_recv_action(game_fd, atype, param, got)
+        if (.not. got) return
 
-        if (int(msg(1)) == 9) then
-            ! Restart signal from host
+        if (atype == 9) then
+            ! Restart signal (replay) — reset and wait for new init
             recv_init_pos = 0
             game_ready    = .false.
             game_ended    = .false.
+            game_ended_by_quit = .false.
             gs%initialized = .false.
+        end if
+
+        if (atype == 10) then
+            ! Back to room — return to room page
+            game_ended = .false.
+            game_ready = .false.
+            gs%initialized = .false.
+            lobby_recv_pos = 0
+            current_page = PAGE_ROOM
+        end if
+
+        if (atype == 8) then
+            ! Opponent left during end-game — go back to room
+            game_ended = .false.
+            game_ready = .false.
+            gs%initialized = .false.
+            lobby_recv_pos = 0
+            current_page = PAGE_ROOM
         end if
     end subroutine
 
@@ -935,19 +1118,13 @@ contains
     ! Restart game (host only): regenerate and send new init
     ! =====================================================================
     subroutine restart_game()
+        integer(c_int) :: st
         if (.not. am_host) return
 
-        ! Send restart signal to client (action_type=9)
-        call send_action(9, 0)
+        ! Sync config from UI variables
+        call sync_cfg_to_server_config()
 
-        ! Ensure maze dims are odd for nice generation
-        if (mod(cfg_maze_w, 2) == 0) cfg_maze_w = cfg_maze_w + 1
-        if (mod(cfg_maze_h, 2) == 0) cfg_maze_h = cfg_maze_h + 1
-
-        call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_item_counts, cfg_min_dist, &
-                      cfg_speed_h, cfg_speed_s, cfg_vision_h, cfg_vision_s, &
-                      cfg_reveal_h, cfg_reveal_s, real(cfg_branch_pct) / 100.0)
-        call send_game_init()
+        call server_restart_game(game_fd, gs, cfg, st)
 
         game_ready   = .true.
         game_ended   = .false.
@@ -959,83 +1136,40 @@ contains
     ! Game initialisation & network protocol
     ! =====================================================================
     subroutine launch_game_as_host()
+        integer(c_int) :: st
         ! Host generates maze and sends init data to client
         am_host = .true.
         am_hider = cfg_host_hides
         game_fd = client_fd
         print *, '[HOST] launch_game_as_host: game_fd=', game_fd
 
-        ! Ensure maze dims are odd for nice generation
-        if (mod(cfg_maze_w, 2) == 0) cfg_maze_w = cfg_maze_w + 1
-        if (mod(cfg_maze_h, 2) == 0) cfg_maze_h = cfg_maze_h + 1
+        ! Sync config from UI variables
+        call sync_cfg_to_server_config()
 
-        call game_init(gs, cfg_maze_w, cfg_maze_h, cfg_item_counts, cfg_min_dist, &
-                      cfg_speed_h, cfg_speed_s, cfg_vision_h, cfg_vision_s, &
-                      cfg_reveal_h, cfg_reveal_s, real(cfg_branch_pct) / 100.0)
+        call server_init_game(gs, cfg)
         print *, '[HOST] game_init done, maze=', gs%maze%w, 'x', gs%maze%h, &
                  ' items=', gs%num_items
-        call send_game_init()
+
+        call server_send_init_to_fd(game_fd, gs, cfg%host_hides, st)
+        print *, '[HOST] send_game_init: status=', st
 
         game_ready   = .true.
         current_page = PAGE_GAME
         print *, '[HOST] game launched, page=PAGE_GAME'
     end subroutine
 
-    ! Send full game state from host to client (blocking)
+    ! Send full game state from host to client (uses server module)
     subroutine send_game_init()
-        integer(c_int8_t), target :: buf(1024)
-        integer :: k, ix, iy, i
         integer(c_int) :: st
-
-        k = 0
-        ! Header: maze_w, maze_h, num_items, speed_h, speed_s,
-        !         vision_h, vision_s, reveal_h, reveal_s, host_hides  (10 bytes)
-        k = k+1; buf(k) = int(gs%maze%w, c_int8_t)
-        k = k+1; buf(k) = int(gs%maze%h, c_int8_t)
-        k = k+1; buf(k) = int(gs%num_items, c_int8_t)
-        k = k+1; buf(k) = int(gs%hider%speed, c_int8_t)
-        k = k+1; buf(k) = int(gs%seeker%speed, c_int8_t)
-        k = k+1; buf(k) = int(gs%hider%vision_radius, c_int8_t)
-        k = k+1; buf(k) = int(gs%seeker%vision_radius, c_int8_t)
-        if (gs%h_reveal) then; buf(k+1) = 1_c_int8_t; else; buf(k+1) = 0_c_int8_t; end if; k = k+1
-        if (gs%s_reveal) then; buf(k+1) = 1_c_int8_t; else; buf(k+1) = 0_c_int8_t; end if; k = k+1
-        if (am_hider) then; buf(k+1) = 1_c_int8_t; else; buf(k+1) = 0_c_int8_t; end if; k = k+1
-
-        ! Maze cells (row-major)
-        do iy = 1, gs%maze%h
-            do ix = 1, gs%maze%w
-                k = k+1; buf(k) = int(gs%maze%cells(ix, iy), c_int8_t)
-            end do
-        end do
-
-        ! Ground items (x, y, type)
-        do i = 1, gs%num_items
-            k = k+1; buf(k) = int(gs%items(i)%x, c_int8_t)
-            k = k+1; buf(k) = int(gs%items(i)%y, c_int8_t)
-            k = k+1; buf(k) = int(gs%items(i)%itype, c_int8_t)
-        end do
-
-        ! Player positions: hider_x, hider_y, seeker_x, seeker_y
-        k = k+1; buf(k) = int(gs%hider%x, c_int8_t)
-        k = k+1; buf(k) = int(gs%hider%y, c_int8_t)
-        k = k+1; buf(k) = int(gs%seeker%x, c_int8_t)
-        k = k+1; buf(k) = int(gs%seeker%y, c_int8_t)
-
-        ! Key position
-        k = k+1; buf(k) = int(gs%key_x, c_int8_t)
-        k = k+1; buf(k) = int(gs%key_y, c_int8_t)
-
-        call net_send_bytes(game_fd, buf, int(k, c_int), st)
-        print *, '[HOST] send_game_init: sent', k, 'bytes, status=', st
+        call server_send_init_to_fd(game_fd, gs, am_hider, st)
+        print *, '[HOST] send_game_init: status=', st
     end subroutine
 
     ! Client: try to receive init data (non-blocking, accumulating)
     subroutine try_recv_game_init()
         integer(c_int8_t), target :: tmp(1024)
         integer(c_int) :: got
-        integer :: k, mw, mh, ni, ix, iy, i, needed, sp_h, sp_s
-        integer :: vis_h, vis_s
-        logical :: rev_h, rev_s, host_hides
+        integer :: needed
 
         ! Try to receive more data into persistent buffer
         call net_try_recv_bytes(game_fd, tmp, int(1024, c_int), got)
@@ -1046,123 +1180,32 @@ contains
             print *, '[CLIENT] recv init: got', got, 'bytes, total=', recv_init_pos
         end if
 
-        if (recv_init_pos < 10) return   ! not enough data yet (10-byte header)
+        if (recv_init_pos < 10) return   ! not enough data yet
 
-        mw   = int(recv_init_buf(1))
-        mh   = int(recv_init_buf(2))
-        ni   = int(recv_init_buf(3))
-        sp_h = int(recv_init_buf(4))
-        sp_s = int(recv_init_buf(5))
-        vis_h = int(recv_init_buf(6))
-        vis_s = int(recv_init_buf(7))
-        rev_h = (recv_init_buf(8) /= 0)
-        rev_s = (recv_init_buf(9) /= 0)
-        host_hides = (recv_init_buf(10) /= 0)
-        needed = 10 + mw*mh + ni*3 + 4 + 2   ! +2 for key position
-
-        if (recv_init_pos < needed) then
+        ! Try parsing the accumulated buffer
+        call server_parse_init_packet(recv_init_buf, recv_init_pos, gs, am_hider, needed)
+        if (needed > 0) then
             print *, '[CLIENT] need', needed, 'bytes, have', recv_init_pos
             return
         end if
-        print *, '[CLIENT] full init received:', needed, 'bytes'
 
-        ! Parse maze
-        k = 10
-        gs%maze%w = mw
-        gs%maze%h = mh
-        gs%maze%cells = 0
-        do iy = 1, mh
-            do ix = 1, mw
-                k = k+1; gs%maze%cells(ix, iy) = int(recv_init_buf(k))
-            end do
-        end do
-
-        ! Parse ground items
-        gs%num_items = ni
-        do i = 1, ni
-            k = k+1; gs%items(i)%x = int(recv_init_buf(k))
-            k = k+1; gs%items(i)%y = int(recv_init_buf(k))
-            k = k+1; gs%items(i)%itype = int(recv_init_buf(k))
-            gs%items(i)%active = .true.
-        end do
-
-        ! Parse player positions
-        k = k+1; gs%hider%x  = int(recv_init_buf(k))
-        k = k+1; gs%hider%y  = int(recv_init_buf(k))
-        k = k+1; gs%seeker%x = int(recv_init_buf(k))
-        k = k+1; gs%seeker%y = int(recv_init_buf(k))
-
-        ! Parse key position
-        k = k+1; gs%key_x = int(recv_init_buf(k))
-        k = k+1; gs%key_y = int(recv_init_buf(k))
-        gs%key_active = .true.
-
-        ! Set up seeker/hider defaults
-        gs%hider%vision_radius  = vis_h
-        gs%hider%num_items      = 0
-        gs%hider%inventory      = ITEM_NONE
-        gs%hider%speed          = sp_h
-        gs%hider%actions_left   = sp_h
-        gs%seeker%vision_radius = vis_s
-        gs%seeker%num_items     = 0
-        gs%seeker%inventory     = ITEM_NONE
-        gs%seeker%speed         = sp_s
-        gs%seeker%actions_left  = sp_s
-
-        gs%h_visible       = .false.
-        gs%s_visible       = .false.
-        gs%h_visited       = .false.
-        gs%s_visited       = .false.
-        gs%h_item_seen     = .false.
-        gs%s_item_seen     = .false.
-        gs%h_last_opp_x    = 0
-        gs%h_last_opp_y    = 0
-        gs%s_last_opp_x    = 0
-        gs%s_last_opp_y    = 0
-        gs%h_opp_seen      = .false.
-        gs%s_opp_seen      = .false.
-        gs%h_illuminate    = .false.
-        gs%s_illuminate    = .false.
-        gs%h_reveal        = rev_h
-        gs%s_reveal        = rev_s
-        gs%turn            = 0
-        gs%turn_number     = 1
-        gs%game_over       = .false.
-        gs%seeker_won      = .false.
-        gs%input_state     = INPUT_MOVE
-        gs%selected_slot   = 0
-        gs%initialized     = .true.
-
-        call game_compute_visibility(gs)
-        ! Client role: opposite of host's choice
-        am_hider = .not. host_hides
+        print *, '[CLIENT] full init received and parsed'
         game_ready = .true.
     end subroutine
 
     ! Send an action to the opponent: 2 bytes [action_type, param]
-    ! action_type: 0 = move (param = direction)
-    !              1-6 = use item from slot (param = direction or 0)
     subroutine send_action(action_type, param)
         integer, intent(in) :: action_type, param
-        integer(c_int8_t), target :: msg(2)
-        integer(c_int) :: st
-        msg(1) = int(action_type, c_int8_t)
-        msg(2) = int(param, c_int8_t)
-        call net_send_bytes(game_fd, msg, 2_c_int, st)
+        call server_send_action(game_fd, action_type, param)
     end subroutine
 
     ! Try to receive opponent's action (non-blocking)
     subroutine try_recv_opponent_action()
-        integer(c_int8_t), target :: msg(2)
-        integer(c_int) :: got
         integer :: atype, param, opp_role
-        logical :: moved
+        logical :: moved, got
 
-        call net_try_recv_bytes(game_fd, msg, 2_c_int, got)
-        if (got < 2) return
-
-        atype = int(msg(1))
-        param = int(msg(2))
+        call server_try_recv_action(game_fd, atype, param, got)
+        if (.not. got) return
 
         if (am_hider) then
             opp_role = ROLE_SEEKER
@@ -1184,6 +1227,7 @@ contains
             gs%s_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
             gs%game_over = .true.
             game_ended   = .true.
+            game_ended_by_quit = .true.
             endgame_msg  = 'Opponent has quit'
             return
         else
@@ -1208,10 +1252,12 @@ contains
         rc = sdl_render_clear(main_renderer)
 
         select case (current_page)
-            case (PAGE_MENU); call render_menu()
-            case (PAGE_HOST); call render_host()
-            case (PAGE_JOIN); call render_join()
-            case (PAGE_GAME); call render_game()
+            case (PAGE_MENU);  call render_menu()
+            case (PAGE_HOST);  call render_host()
+            case (PAGE_JOIN);  call render_join()
+            case (PAGE_GAME);  call render_game()
+            case (PAGE_LOBBY); call render_lobby()
+            case (PAGE_ROOM);  call render_room()
         end select
 
         call sdl_render_present(main_renderer)
@@ -1233,6 +1279,16 @@ contains
     subroutine render_host()
         character(len=256) :: info
         integer :: py, ly, ry
+
+        ! Simplified UI when hosting with embedded server (brief self-connect)
+        if (hosting_with_server) then
+            call draw_text_centered('Starting server...', big_font, COL_CYAN, SCREEN_W/2, 200)
+            write(info,'(A,A)') 'Local IP: ', trim(local_ip)
+            call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 260)
+            call draw_button(SCREEN_W/2 - 100, 340, 200, 40, 'Cancel', COL_RED)
+            return
+        end if
+
         call draw_text_centered('Hosting', big_font, COL_CYAN, SCREEN_W/2, 20)
         write(info,'(A,A)') 'Local IP: ', trim(local_ip)
         call draw_text_centered(trim(info), sml_font, COL_WHITE, SCREEN_W/2, 64)
@@ -1939,13 +1995,20 @@ contains
             write(label, '(A,I0)') 'Turn: ', gs%turn_number
             call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
 
-            ! Buttons inside HUD
-            call draw_button(15, hud_y + 45, 170, 35, 'Back to menu', COL_RED)
-            if (am_host) then
-                call draw_button(200, hud_y + 45, 190, 35, 'New game', COL_GREEN)
+            if (game_ended_by_quit) then
+                ! Quit scenario: "Back to room" + "Back to menu"
+                call draw_button(15, hud_y + 45, 190, 35, 'Back to room', COL_CYAN)
+                call draw_button(220, hud_y + 45, 190, 35, 'Back to menu', COL_RED)
             else
-                call draw_text_at(sml_font, 'Waiting for host...', &
-                                  COL_DIM, 200, hud_y + 52)
+                ! Natural game over: role-dependent buttons
+                if (room_i_am_host) then
+                    call draw_button(15, hud_y + 45, 150, 35, 'Replay', COL_GREEN)
+                    call draw_button(180, hud_y + 45, 190, 35, 'Back to room', COL_CYAN)
+                else
+                    call draw_button(15, hud_y + 45, 150, 35, 'Leave', COL_RED)
+                    call draw_text_at(sml_font, 'Waiting for host...', &
+                                      COL_DIM, 180, hud_y + 52)
+                end if
             end if
             call draw_text_at(sml_font, 'Esc = Menu', COL_DIM, 470, hud_y + 52)
             return
@@ -2182,6 +2245,588 @@ contains
 
         call draw_text_centered('GAME OVER  -  ' // trim(endgame_msg), &
                                 sml_font, COL_YELLOW, SCREEN_W/2, 4)
+    end subroutine
+
+    ! =====================================================================
+    ! LOBBY PAGE: room list, create, join, refresh
+    ! =====================================================================
+
+    ! --- Lobby message send helpers ---
+    subroutine send_list_rooms_request()
+        integer(c_int8_t), target :: dummy(1)
+        integer(c_int) :: st
+        call net_send_msg(game_fd, MSG_LIST_ROOMS, dummy, 0, st)
+    end subroutine
+
+    subroutine send_create_room(rname, pname)
+        character(len=*), intent(in) :: rname, pname
+        integer(c_int8_t), target :: buf(128)
+        integer :: k, nlen, plen
+        integer(c_int) :: st
+
+        k = 0
+        nlen = len_trim(rname)
+        k=k+1; buf(k) = int(nlen, c_int8_t)
+        buf(k+1:k+nlen) = transfer(rname(1:nlen), buf(1:nlen))
+        k = k + nlen
+        plen = len_trim(pname)
+        k=k+1; buf(k) = int(plen, c_int8_t)
+        if (plen > 0) then
+            buf(k+1:k+plen) = transfer(pname(1:plen), buf(1:plen))
+            k = k + plen
+        end if
+        call net_send_msg(game_fd, MSG_CREATE_ROOM, buf, k, st)
+    end subroutine
+
+    subroutine send_join_room(room_id, pname)
+        integer, intent(in) :: room_id
+        character(len=*), intent(in) :: pname
+        integer(c_int8_t), target :: buf(64)
+        integer :: k, plen
+        integer(c_int) :: st
+
+        k = 0
+        k=k+1; buf(k) = int(room_id, c_int8_t)
+        plen = len_trim(pname)
+        k=k+1; buf(k) = int(plen, c_int8_t)
+        if (plen > 0) then
+            buf(k+1:k+plen) = transfer(pname(1:plen), buf(1:plen))
+            k = k + plen
+        end if
+        call net_send_msg(game_fd, MSG_JOIN_ROOM, buf, k, st)
+    end subroutine
+
+    subroutine send_leave_room()
+        integer(c_int8_t), target :: dummy(1)
+        integer(c_int) :: st
+        call net_send_msg(game_fd, MSG_LEAVE_ROOM, dummy, 0, st)
+    end subroutine
+
+    subroutine send_config_change()
+        integer(c_int8_t), target :: buf(32)
+        integer :: nbytes
+        integer(c_int) :: st
+        call server_config_to_bytes(room_cfg, buf, nbytes)
+        call net_send_msg(game_fd, MSG_CONFIG_CHANGE, buf, nbytes, st)
+    end subroutine
+
+    subroutine send_start_game_request()
+        integer(c_int8_t), target :: dummy(1)
+        integer(c_int) :: st
+        call net_send_msg(game_fd, MSG_START_GAME, dummy, 0, st)
+    end subroutine
+
+    ! --- Poll lobby messages ---
+    subroutine poll_lobby_messages()
+        integer(c_int8_t) :: msg_type
+        integer(c_int8_t) :: payload(2048)
+        integer :: payload_len
+        logical :: got
+
+        call net_try_recv_msg(game_fd, lobby_recv_buf, 4096, lobby_recv_pos, &
+                              msg_type, payload, 2048, payload_len, got)
+        if (.not. got) return
+
+        select case (msg_type)
+            case (MSG_ROOM_LIST)
+                call room_parse_list_payload(payload, payload_len, &
+                    lobby_room_ids, lobby_room_names, lobby_room_nplayers, &
+                    lobby_room_ingame, lobby_num_rooms)
+                print *, '[LOBBY] received room list:', lobby_num_rooms, 'rooms'
+
+            case (MSG_ROOM_UPDATE)
+                call room_parse_update_payload(payload, payload_len, &
+                    room_cfg, room_player_names, room_player_is_host, room_num_players)
+                print *, '[ROOM] update: ', room_num_players, ' players, host=', room_i_am_host
+                ! If we're on the lobby page but got a room update, switch to room page
+                if (current_page == PAGE_LOBBY) then
+                    current_page = PAGE_ROOM
+                end if
+
+            case (MSG_START_GAME)
+                ! Game is starting! Switch to game page and wait for init data
+                print *, '[ROOM] game starting!'
+                current_page = PAGE_GAME
+                am_host = .false.   ! on dedicated server we're never HOST in the old sense
+                game_ready = .false.
+                gs%initialized = .false.
+                recv_init_pos = 0
+                ! Transfer any leftover lobby recv data to init buffer
+                if (lobby_recv_pos > 0) then
+                    recv_init_buf(1:lobby_recv_pos) = lobby_recv_buf(1:lobby_recv_pos)
+                    recv_init_pos = lobby_recv_pos
+                    lobby_recv_pos = 0
+                end if
+
+            case default
+                print *, '[LOBBY] unknown message type:', int(msg_type)
+        end select
+    end subroutine
+
+    ! --- Lobby click handling ---
+    subroutine handle_lobby_click(mx, my)
+        integer, intent(in) :: mx, my
+        integer :: i, ry
+
+        if (lobby_creating) then
+            ! "Create" confirm button: (250, 480, 300, 40)
+            if (mx>=250 .and. mx<=550 .and. my>=480 .and. my<=520) then
+                if (len_trim(lobby_room_name_input) > 0) then
+                    call send_create_room(trim(lobby_room_name_input), trim(lobby_player_name))
+                    room_i_am_host = .true.
+                    lobby_creating = .false.
+                end if
+                return
+            end if
+            ! "Cancel" button: (300, 530, 200, 35)
+            if (mx>=300 .and. mx<=500 .and. my>=530 .and. my<=565) then
+                lobby_creating = .false.
+                call c_sdl_stop_text_input()
+                return
+            end if
+            ! Player name field: (250, 420, 300, 35)
+            if (mx>=250 .and. mx<=550 .and. my>=420 .and. my<=455) then
+                active_field = 10  ! player name
+                call c_sdl_start_text_input()
+                return
+            end if
+            ! Room name field: (250, 360, 300, 35)
+            if (mx>=250 .and. mx<=550 .and. my>=360 .and. my<=395) then
+                active_field = 11  ! room name
+                call c_sdl_start_text_input()
+                return
+            end if
+            return
+        end if
+
+        ! "Create room" button: (250, 160, 150, 40)
+        if (mx>=250 .and. mx<=400 .and. my>=160 .and. my<=200) then
+            lobby_creating = .true.
+            lobby_room_name_input = ' '
+            active_field = 11  ! room name first
+            call c_sdl_start_text_input()
+            return
+        end if
+
+        ! "Refresh" button: (450, 160, 150, 40)
+        if (mx>=450 .and. mx<=600 .and. my>=160 .and. my<=200) then
+            call send_list_rooms_request()
+            return
+        end if
+
+        ! "Back" button: (300, 540, 200, 40)
+        if (mx>=300 .and. mx<=500 .and. my>=540 .and. my<=580) then
+            call go_back_to_menu()
+            return
+        end if
+
+        ! Room list: each room row is 40px tall starting at y=250
+        do i = 1, lobby_num_rooms
+            ry = 250 + (i-1) * 45
+            ! "Join" button for this room: (620, ry+5, 80, 30)
+            if (mx>=620 .and. mx<=700 .and. my>=ry+5 .and. my<=ry+35) then
+                if (.not. lobby_room_ingame(i) .and. lobby_room_nplayers(i) < 2) then
+                    call send_join_room(lobby_room_ids(i), trim(lobby_player_name))
+                    room_i_am_host = .false.
+                end if
+                return
+            end if
+        end do
+    end subroutine
+
+    ! --- Lobby keyboard ---
+    subroutine handle_lobby_keys(sym)
+        integer(c_int32_t), intent(in) :: sym
+        integer :: l
+
+        if (sym == SDLK_ESCAPE) then
+            if (lobby_creating) then
+                lobby_creating = .false.
+                call c_sdl_stop_text_input()
+            else
+                call go_back_to_menu()
+            end if
+            return
+        end if
+
+        if (.not. lobby_creating) return
+
+        if (sym == SDLK_BACKSPACE) then
+            if (active_field == 11) then
+                l = len_trim(lobby_room_name_input)
+                if (l > 0) lobby_room_name_input(l:l) = ' '
+            else if (active_field == 10) then
+                l = len_trim(lobby_player_name)
+                if (l > 0) lobby_player_name(l:l) = ' '
+            end if
+        end if
+
+        if (sym == SDLK_TAB) then
+            if (active_field == 11) then
+                active_field = 10
+            else
+                active_field = 11
+            end if
+        end if
+
+        if (sym == SDLK_RETURN) then
+            if (len_trim(lobby_room_name_input) > 0) then
+                call send_create_room(trim(lobby_room_name_input), trim(lobby_player_name))
+                room_i_am_host = .true.
+                lobby_creating = .false.
+                call c_sdl_stop_text_input()
+            end if
+        end if
+    end subroutine
+
+    ! --- Lobby text input ---
+    subroutine handle_lobby_text_input(text_chars)
+        character(kind=c_char), intent(in) :: text_chars(32)
+        character(len=1) :: ch
+        integer :: l
+
+        ch = text_chars(1)
+        if (iachar(ch) < 32 .or. iachar(ch) > 126) return
+
+        if (active_field == 11) then
+            l = len_trim(lobby_room_name_input)
+            if (l < 30) lobby_room_name_input(l+1:l+1) = ch
+        else if (active_field == 10) then
+            l = len_trim(lobby_player_name)
+            if (l < 30) lobby_player_name(l+1:l+1) = ch
+        end if
+    end subroutine
+
+    ! --- Render lobby page ---
+    subroutine render_lobby()
+        integer :: i, ry
+        character(len=80) :: info
+
+        call draw_text_centered('Server Lobby', big_font, COL_CYAN, SCREEN_W/2, 20)
+        call draw_text_centered('Choose a room to join or create one', &
+                                sml_font, COL_GRAY, SCREEN_W/2, 70)
+
+        ! Player name display
+        write(info, '(A,A)') 'Player: ', trim(lobby_player_name)
+        call draw_text_at(sml_font, trim(info), COL_WHITE, 20, 110)
+
+        if (lobby_creating) then
+            ! --- Create room form ---
+            call draw_text_centered('Create a Room', big_font, COL_YELLOW, SCREEN_W/2, 280)
+            call draw_text_at(sml_font, 'Room name:', COL_WHITE, 250, 340)
+            call draw_input_field(250, 360, 300, 35, trim(lobby_room_name_input), active_field==11)
+            call draw_text_at(sml_font, 'Your name:', COL_WHITE, 250, 400)
+            call draw_input_field(250, 420, 300, 35, trim(lobby_player_name), active_field==10)
+            call draw_button(250, 480, 300, 40, 'Create', COL_GREEN)
+            call draw_button(300, 530, 200, 35, 'Cancel', COL_RED)
+        else
+            ! --- Room list ---
+            call draw_button(250, 160, 150, 40, 'Create room', COL_GREEN)
+            call draw_button(450, 160, 150, 40, 'Refresh', COL_CYAN)
+
+            ! Column headers
+            call draw_text_at(sml_font, 'Room', COL_GRAY, 100, 225)
+            call draw_text_at(sml_font, 'Players', COL_GRAY, 460, 225)
+            call draw_text_at(sml_font, 'Status', COL_GRAY, 540, 225)
+
+            if (lobby_num_rooms == 0) then
+                call draw_text_centered('No rooms available', sml_font, &
+                                        COL_DIM, SCREEN_W/2, 300)
+            else
+                do i = 1, lobby_num_rooms
+                    ry = 250 + (i-1) * 45
+                    ! Room name
+                    call draw_text_at(sml_font, trim(lobby_room_names(i)), &
+                                      COL_WHITE, 100, ry + 10)
+                    ! Player count
+                    write(info, '(I0,A)') lobby_room_nplayers(i), '/2'
+                    call draw_text_at(sml_font, trim(info), COL_YELLOW, 470, ry + 10)
+                    ! Status
+                    if (lobby_room_ingame(i)) then
+                        call draw_text_at(sml_font, 'In game', COL_RED, 540, ry + 10)
+                    else if (lobby_room_nplayers(i) >= 2) then
+                        call draw_text_at(sml_font, 'Full', COL_ORANGE, 540, ry + 10)
+                    else
+                        call draw_text_at(sml_font, 'Open', COL_GREEN, 540, ry + 10)
+                        call draw_button(620, ry+5, 80, 30, 'Join', COL_GREEN)
+                    end if
+
+                    ! Separator line
+                    rc = sdl_set_render_draw_color(main_renderer, &
+                            uint8(60), uint8(60), uint8(70), uint8(255))
+                    rc = sdl_render_draw_line(main_renderer, 80, ry+40, 720, ry+40)
+                end do
+            end if
+
+            call draw_button(300, 540, 200, 40, 'Back', COL_RED)
+        end if
+
+        if (len_trim(error_message) > 0) &
+            call draw_text_centered(trim(error_message), sml_font, COL_RED, &
+                                    SCREEN_W/2, 580)
+    end subroutine
+
+    ! =====================================================================
+    ! ROOM PAGE: config view, player list, start/leave
+    ! =====================================================================
+
+    ! --- Room click handling ---
+    subroutine handle_room_click(mx, my)
+        integer, intent(in) :: mx, my
+        integer :: total_items
+
+        ! "Leave" button: (300, 540, 200, 40)
+        if (mx>=300 .and. mx<=500 .and. my>=540 .and. my<=580) then
+            call send_leave_room()
+            room_my_id = 0
+            if (hosting_with_server) then
+                call go_back_to_menu()
+            else
+                current_page = PAGE_LOBBY
+                call send_list_rooms_request()
+            end if
+            return
+        end if
+
+        ! "Start game" button (host only): (250, 480, 300, 50)
+        if (room_i_am_host .and. room_num_players >= 2) then
+            if (mx>=250 .and. mx<=550 .and. my>=480 .and. my<=530) then
+                call send_start_game_request()
+                return
+            end if
+        end if
+
+        ! Config editing (host only) - similar layout to host page
+        if (.not. room_i_am_host) return
+
+        total_items = sum(room_cfg%item_counts)
+
+        ! ===== LEFT COLUMN (x_base=20): minus at 240, plus at 315 =====
+        ! Row: Width (y=184)
+        if (my >= 171 .and. my <= 197) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%maze_w = max(7, room_cfg%maze_w - 2)
+            if (mx >= 315 .and. mx <= 337) room_cfg%maze_w = min(MAZE_MAX_W, room_cfg%maze_w + 2)
+            call send_config_change(); return
+        end if
+        ! Row: Height (y=210)
+        if (my >= 197 .and. my <= 223) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%maze_h = max(7, room_cfg%maze_h - 2)
+            if (mx >= 315 .and. mx <= 337) room_cfg%maze_h = min(MAZE_MAX_H, room_cfg%maze_h + 2)
+            call send_config_change(); return
+        end if
+        ! Row: Min dist (y=236)
+        if (my >= 223 .and. my <= 249) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%min_dist = max(1, room_cfg%min_dist - 1)
+            if (mx >= 315 .and. mx <= 337) room_cfg%min_dist = min(99, room_cfg%min_dist + 1)
+            call send_config_change(); return
+        end if
+        ! Row: Branch % (y=262)
+        if (my >= 249 .and. my <= 275) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%branch_pct = max(0, room_cfg%branch_pct - 1)
+            if (mx >= 315 .and. mx <= 337) room_cfg%branch_pct = min(50, room_cfg%branch_pct + 1)
+            call send_config_change(); return
+        end if
+        ! Row: Host hides toggle (y=288)
+        if (my >= 275 .and. my <= 301) then
+            if (mx >= 240 .and. mx <= 300) then
+                room_cfg%host_hides = .not. room_cfg%host_hides
+                call send_config_change(); return
+            end if
+        end if
+
+        ! -- Bonuses block rows --
+        ! Row: Nb Dash (y=358)
+        if (my >= 345 .and. my <= 371) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_DASH) = max(0, room_cfg%item_counts(ITEM_DASH) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
+                room_cfg%item_counts(ITEM_DASH) = room_cfg%item_counts(ITEM_DASH) + 1
+            call send_config_change(); return
+        end if
+        ! Row: Nb Vision (y=384)
+        if (my >= 371 .and. my <= 397) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_VISION) = max(0, room_cfg%item_counts(ITEM_VISION) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
+                room_cfg%item_counts(ITEM_VISION) = room_cfg%item_counts(ITEM_VISION) + 1
+            call send_config_change(); return
+        end if
+        ! Row: Nb Light (y=410)
+        if (my >= 397 .and. my <= 423) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_ILLUMINATE) = max(0, room_cfg%item_counts(ITEM_ILLUMINATE) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
+                room_cfg%item_counts(ITEM_ILLUMINATE) = room_cfg%item_counts(ITEM_ILLUMINATE) + 1
+            call send_config_change(); return
+        end if
+        ! Row: Nb Speed (y=436)
+        if (my >= 423 .and. my <= 449) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_SPEED) = max(0, room_cfg%item_counts(ITEM_SPEED) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
+                room_cfg%item_counts(ITEM_SPEED) = room_cfg%item_counts(ITEM_SPEED) + 1
+            call send_config_change(); return
+        end if
+        ! Row: Nb Pickaxe (y=462)
+        if (my >= 449 .and. my <= 475) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_WALL_BREAK) = max(0, room_cfg%item_counts(ITEM_WALL_BREAK) - 1)
+            if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
+                room_cfg%item_counts(ITEM_WALL_BREAK) = room_cfg%item_counts(ITEM_WALL_BREAK) + 1
+            call send_config_change(); return
+        end if
+
+        ! ===== RIGHT COLUMN (x_base=410): minus at 630, plus at 705 =====
+        ! -- Hider block --
+        ! Row: Speed (y=184)
+        if (my >= 171 .and. my <= 197) then
+            if (mx >= 630 .and. mx <= 652) room_cfg%speed_h = max(1, room_cfg%speed_h - 1)
+            if (mx >= 705 .and. mx <= 727) room_cfg%speed_h = min(5, room_cfg%speed_h + 1)
+            call send_config_change(); return
+        end if
+        ! Row: Vision (y=210)
+        if (my >= 197 .and. my <= 223) then
+            if (mx >= 630 .and. mx <= 652) room_cfg%vision_h = max(1, room_cfg%vision_h - 1)
+            if (mx >= 705 .and. mx <= 727) room_cfg%vision_h = min(10, room_cfg%vision_h + 1)
+            call send_config_change(); return
+        end if
+        ! Row: Maze revealed toggle (y=236)
+        if (my >= 223 .and. my <= 249) then
+            if (mx >= 630 .and. mx <= 690) then
+                room_cfg%reveal_h = .not. room_cfg%reveal_h
+                call send_config_change(); return
+            end if
+        end if
+
+        ! -- Seeker block --
+        ! Row: Speed (y=308)
+        if (my >= 295 .and. my <= 321) then
+            if (mx >= 630 .and. mx <= 652) room_cfg%speed_s = max(1, room_cfg%speed_s - 1)
+            if (mx >= 705 .and. mx <= 727) room_cfg%speed_s = min(5, room_cfg%speed_s + 1)
+            call send_config_change(); return
+        end if
+        ! Row: Vision (y=334)
+        if (my >= 321 .and. my <= 347) then
+            if (mx >= 630 .and. mx <= 652) room_cfg%vision_s = max(1, room_cfg%vision_s - 1)
+            if (mx >= 705 .and. mx <= 727) room_cfg%vision_s = min(10, room_cfg%vision_s + 1)
+            call send_config_change(); return
+        end if
+        ! Row: Maze revealed toggle (y=360)
+        if (my >= 347 .and. my <= 373) then
+            if (mx >= 630 .and. mx <= 690) then
+                room_cfg%reveal_s = .not. room_cfg%reveal_s
+                call send_config_change(); return
+            end if
+        end if
+    end subroutine
+
+    ! --- Room keyboard ---
+    subroutine handle_room_keys(sym)
+        integer(c_int32_t), intent(in) :: sym
+        if (sym == SDLK_ESCAPE) then
+            call send_leave_room()
+            room_my_id = 0
+            if (hosting_with_server) then
+                call go_back_to_menu()
+            else
+                current_page = PAGE_LOBBY
+                call send_list_rooms_request()
+            end if
+        end if
+    end subroutine
+
+    ! --- Render room page ---
+    subroutine render_room()
+        integer :: ly, ry, i
+        character(len=80) :: info
+
+        call draw_text_centered('Room', big_font, COL_CYAN, SCREEN_W/2, 10)
+
+        ! ===== LEFT COLUMN: Config =====
+        call draw_text_at(sml_font, '--- General ---', COL_GRAY, 20, 140)
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(80), uint8(80), uint8(100), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 20, 160, 390, 160)
+
+        ly = 184
+        call draw_param_row_at(20, ly, 'Width',     room_cfg%maze_w);  ly = ly + 26
+        call draw_param_row_at(20, ly, 'Height',    room_cfg%maze_h);  ly = ly + 26
+        call draw_param_row_at(20, ly, 'Min dist.', room_cfg%min_dist); ly = ly + 26
+        call draw_param_row_at(20, ly, 'Branch %',  room_cfg%branch_pct); ly = ly + 26
+        call draw_toggle_row_at(20, ly, 'Host hides', room_cfg%host_hides); ly = ly + 26
+
+        ly = ly + 8
+        call draw_text_at(sml_font, '--- Bonuses ---', COL_GRAY, 20, ly)
+        ly = ly + 20
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(80), uint8(80), uint8(100), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 20, ly, 390, ly)
+        ly = ly + 18
+        call draw_param_row_at(20, ly, 'Nb Dash',    room_cfg%item_counts(ITEM_DASH));    ly = ly + 26
+        call draw_param_row_at(20, ly, 'Nb Vision',  room_cfg%item_counts(ITEM_VISION));  ly = ly + 26
+        call draw_param_row_at(20, ly, 'Nb Light',   room_cfg%item_counts(ITEM_ILLUMINATE)); ly = ly + 26
+        call draw_param_row_at(20, ly, 'Nb Speed',   room_cfg%item_counts(ITEM_SPEED));   ly = ly + 26
+        call draw_param_row_at(20, ly, 'Nb Pickaxe', room_cfg%item_counts(ITEM_WALL_BREAK)); ly = ly + 26
+
+        ! ===== RIGHT COLUMN: Hider/Seeker config =====
+        call draw_text_at(sml_font, '--- Hider ---', COL_GRAY, 410, 140)
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(80), uint8(80), uint8(100), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 410, 160, 770, 160)
+
+        ry = 184
+        call draw_param_row_at(410, ry, 'Speed',  room_cfg%speed_h);  ry = ry + 26
+        call draw_param_row_at(410, ry, 'Vision', room_cfg%vision_h); ry = ry + 26
+        call draw_toggle_row_at(410, ry, 'Maze revealed', room_cfg%reveal_h); ry = ry + 26
+
+        ry = ry + 8
+        call draw_text_at(sml_font, '--- Seeker ---', COL_GRAY, 410, ry)
+        ry = ry + 20
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(80), uint8(80), uint8(100), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 410, ry, 770, ry)
+        ry = ry + 18
+        call draw_param_row_at(410, ry, 'Speed',  room_cfg%speed_s);  ry = ry + 26
+        call draw_param_row_at(410, ry, 'Vision', room_cfg%vision_s); ry = ry + 26
+        call draw_toggle_row_at(410, ry, 'Maze revealed', room_cfg%reveal_s); ry = ry + 26
+
+        ! ===== Players list =====
+        ry = ry + 20
+        call draw_text_at(sml_font, '--- Players ---', COL_GRAY, 410, ry)
+        ry = ry + 20
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(80), uint8(80), uint8(100), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 410, ry, 770, ry)
+        ry = ry + 10
+        do i = 1, room_num_players
+            if (room_player_is_host(i)) then
+                write(info, '(A,A,A)') trim(room_player_names(i)), ' ', '(host)'
+                call draw_text_at(sml_font, trim(info), COL_YELLOW, 420, ry)
+            else
+                call draw_text_at(sml_font, trim(room_player_names(i)), COL_WHITE, 420, ry)
+            end if
+            ry = ry + 22
+        end do
+
+        if (.not. room_i_am_host) then
+            call draw_text_centered('Waiting for host to start...', sml_font, &
+                                    COL_DIM, SCREEN_W/2, 50)
+        end if
+
+        ! Host-only info
+        if (room_i_am_host .and. room_num_players < 2) then
+            call draw_text_centered('Waiting for another player...', sml_font, &
+                                    COL_YELLOW, SCREEN_W/2, 50)
+        end if
+
+        ! Show connection info when hosting
+        if (hosting_with_server) then
+            write(info, '(A,A,A,I0)') 'IP: ', trim(local_ip), '  Port: ', DEFAULT_PORT
+            call draw_text_centered(trim(info), sml_font, COL_GRAY, SCREEN_W/2, 75)
+        end if
+
+        ! Start button (host only, 2 players)
+        if (room_i_am_host .and. room_num_players >= 2) then
+            call draw_button(250, 480, 300, 50, 'Start game', COL_GREEN)
+        end if
+
+        ! Leave button
+        call draw_button(300, 540, 200, 40, 'Leave', COL_RED)
     end subroutine
 
     function int_to_str(n) result(s)

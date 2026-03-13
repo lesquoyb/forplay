@@ -16,26 +16,19 @@ module network
     public :: net_get_local_ip, net_get_public_ip
     public :: net_try_accept_nonblocking
     public :: net_send_bytes, net_recv_all, net_try_recv_bytes
+    public :: net_send_msg, net_try_recv_msg
 
-    ! Portable C helper for setting non-blocking mode.
-    ! On Linux/macOS this uses fcntl() instead of the variadic ioctl(),
-    ! avoiding ABI issues when calling variadic C functions from Fortran.
-    interface
-        function c_set_nonblocking(fd, enable) bind(C, name="c_set_nonblocking")
-            import :: c_int
-            integer(c_int), value :: fd
-            integer(c_int), value :: enable
-            integer(c_int) :: c_set_nonblocking
-        end function
-
-        ! Returns: 1 = connected, 0 = pending, -1 = getsockopt failed,
-        !          -N = connection failed with SO_ERROR == N
-        function c_poll_connect(sockfd) bind(C, name="c_poll_connect")
-            import :: c_int
-            integer(c_int), value :: sockfd
-            integer(c_int) :: c_poll_connect
-        end function
-    end interface
+    ! Lobby message types
+    integer(c_int8_t), parameter, public :: MSG_LIST_ROOMS   = 10
+    integer(c_int8_t), parameter, public :: MSG_ROOM_LIST    = 11
+    integer(c_int8_t), parameter, public :: MSG_CREATE_ROOM  = 12
+    integer(c_int8_t), parameter, public :: MSG_JOIN_ROOM    = 13
+    integer(c_int8_t), parameter, public :: MSG_LEAVE_ROOM   = 14
+    integer(c_int8_t), parameter, public :: MSG_ROOM_UPDATE  = 15
+    integer(c_int8_t), parameter, public :: MSG_CONFIG_CHANGE = 16
+    integer(c_int8_t), parameter, public :: MSG_START_GAME   = 17
+    integer(c_int8_t), parameter, public :: MSG_GAME_INIT    = 18
+    integer(c_int8_t), parameter, public :: MSG_KICK         = 19
 
 contains
 
@@ -136,13 +129,13 @@ contains
         cli_fd = -1
 
         ! Set non-blocking
-        res = c_set_nonblocking(srv_fd, 1_c_int)
+        res = set_nonblocking(srv_fd, 1_c_int)
 
         ! Try accept (like example: c_null_ptr, 0_c_int)
         cli_fd = accept(srv_fd, c_null_ptr, 0_c_int)
 
         ! Restore blocking
-        res = c_set_nonblocking(srv_fd, 0_c_int)
+        res = set_nonblocking(srv_fd, 0_c_int)
 
         if (cli_fd >= 0) then
             got_client = .true.
@@ -211,7 +204,7 @@ contains
         addr%sin_zero = c_null_char
 
         ! Set non-blocking before connect
-        status = c_set_nonblocking(sock_fd, 1_c_int)
+        status = set_nonblocking(sock_fd, 1_c_int)
 
         status = connect(sock_fd, c_loc(addr), int(c_sizeof(addr), c_int))
         if (status /= 0) then
@@ -258,11 +251,11 @@ contains
         ! Use the C helper which calls getsockopt(SO_ERROR) + getpeername
         ! natively, avoiding Fortran ↔ C interop issues with pointer
         ! arguments that caused failures on Linux.
-        res = c_poll_connect(sock_fd)
+        res = poll_connect(sock_fd)
 
         if (res == 1) then
             ! Connected! Restore blocking mode and set TCP_NODELAY
-            res = c_set_nonblocking(sock_fd, 0_c_int)
+            res = set_nonblocking(sock_fd, 0_c_int)
             opt_on = 1_c_int
             res = setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &
                              c_loc(opt_on), int(c_sizeof(opt_on), c_int))
@@ -422,12 +415,95 @@ contains
 
         received = 0
 
-        res = c_set_nonblocking(sockfd, 1_c_int)
+        res = set_nonblocking(sockfd, 1_c_int)
 
         received = recv(sockfd, c_loc(buf), maxlen, 0_c_int)
         if (received < 0) received = 0
 
-        res = c_set_nonblocking(sockfd, 0_c_int)
+        res = set_nonblocking(sockfd, 0_c_int)
+    end subroutine
+
+    ! ==================================================================
+    ! Send a length-prefixed lobby message: [type:1][len_hi:1][len_lo:1][payload:N]
+    ! Returns status: 0=success, -1=failure
+    ! ==================================================================
+    subroutine net_send_msg(sockfd, msg_type, payload, payload_len, status)
+        integer(c_int), intent(in) :: sockfd
+        integer(c_int8_t), intent(in) :: msg_type
+        integer(c_int8_t), intent(in), target :: payload(*)
+        integer, intent(in) :: payload_len
+        integer(c_int), intent(out) :: status
+
+        integer(c_int8_t), target :: header(3)
+
+        header(1) = msg_type
+        header(2) = int(ishft(payload_len, -8), c_int8_t)  ! len high byte
+        header(3) = int(iand(payload_len, 255), c_int8_t)   ! len low byte
+
+        call net_send_bytes(sockfd, header, 3_c_int, status)
+        if (status /= 0) return
+
+        if (payload_len > 0) then
+            call net_send_bytes(sockfd, payload, int(payload_len, c_int), status)
+        end if
+    end subroutine
+
+    ! ==================================================================
+    ! Try to receive a lobby message (non-blocking, accumulating).
+    !
+    ! recv_buf / recv_pos: persistent accumulation buffer managed by caller.
+    ! On success: msg_type, payload(1:payload_len) filled, recv_pos updated.
+    ! got = .true. if a complete message was received.
+    ! ==================================================================
+    subroutine net_try_recv_msg(sockfd, recv_buf, recv_buf_size, recv_pos, &
+                                 msg_type, payload, max_payload, payload_len, got)
+        integer(c_int), intent(in)    :: sockfd
+        integer(c_int8_t), intent(inout) :: recv_buf(*)
+        integer, intent(in)           :: recv_buf_size
+        integer, intent(inout)        :: recv_pos
+        integer(c_int8_t), intent(out) :: msg_type
+        integer(c_int8_t), intent(out) :: payload(*)
+        integer, intent(in)           :: max_payload
+        integer, intent(out)          :: payload_len
+        logical, intent(out)          :: got
+
+        integer(c_int8_t), target :: tmp(1024)
+        integer(c_int) :: nbytes
+        integer :: needed, plen, copy_len
+
+        got = .false.
+        msg_type = 0
+        payload_len = 0
+
+        ! Try to receive more data
+        call net_try_recv_bytes(sockfd, tmp, int(min(1024, recv_buf_size - recv_pos), c_int), nbytes)
+        if (nbytes > 0) then
+            recv_buf(recv_pos+1 : recv_pos+nbytes) = tmp(1:nbytes)
+            recv_pos = recv_pos + nbytes
+        end if
+
+        ! Need at least 3 bytes for header
+        if (recv_pos < 3) return
+
+        ! Parse header
+        msg_type = recv_buf(1)
+        plen = ior(ishft(iand(int(recv_buf(2)), 255), 8), iand(int(recv_buf(3)), 255))
+
+        needed = 3 + plen
+        if (recv_pos < needed) return
+
+        ! Complete message available
+        payload_len = min(plen, max_payload)
+        if (payload_len > 0) then
+            payload(1:payload_len) = recv_buf(4 : 3+payload_len)
+        end if
+        got = .true.
+
+        ! Shift remaining data to front of buffer
+        if (recv_pos > needed) then
+            recv_buf(1 : recv_pos - needed) = recv_buf(needed+1 : recv_pos)
+        end if
+        recv_pos = recv_pos - needed
     end subroutine
 
 end module network
