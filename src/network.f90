@@ -17,6 +17,7 @@ module network
     public :: net_try_accept_nonblocking
     public :: net_send_bytes, net_recv_all, net_try_recv_bytes
     public :: net_send_msg, net_try_recv_msg
+    public :: net_drain_socket
 
     ! Lobby message types
     integer(c_int8_t), parameter, public :: MSG_LIST_ROOMS   = 10
@@ -29,6 +30,7 @@ module network
     integer(c_int8_t), parameter, public :: MSG_START_GAME   = 17
     integer(c_int8_t), parameter, public :: MSG_GAME_INIT    = 18
     integer(c_int8_t), parameter, public :: MSG_KICK         = 19
+    integer(c_int8_t), parameter, public :: MSG_TEAM_CHANGE  = 20
 
 contains
 
@@ -80,8 +82,6 @@ contains
             return
         end if
 
-        status = setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &
-                            c_loc(optyes), int(c_sizeof(optyes), c_int))
         status = setsockopt(server_fd, IPPROTO_TCP, TCP_NODELAY, &
                             c_loc(optyes), int(c_sizeof(optyes), c_int))
 
@@ -92,7 +92,15 @@ contains
 
         status = bind(server_fd, c_loc(addr), int(c_sizeof(addr), c_int))
         if (status /= 0) then
-            write(error_msg, '(A,I0)') 'Error: bind failed, code=', get_errno()
+            block
+                integer(c_int) :: eno
+                eno = get_errno()
+                if (eno == 10048 .or. eno == 98) then
+                    write(error_msg, '(A,I0,A)') 'Error: port ', port, ' is already in use'
+                else
+                    write(error_msg, '(A,I0)') 'Error: bind failed, code=', eno
+                end if
+            end block
             call net_close(server_fd)
             server_fd = -1
             return
@@ -418,8 +426,28 @@ contains
         res = set_nonblocking(sockfd, 1_c_int)
 
         received = recv(sockfd, c_loc(buf), maxlen, 0_c_int)
-        if (received < 0) received = 0
+        if (received < 0) then
+            received = 0   ! EWOULDBLOCK: no data yet
+        else if (received == 0) then
+            received = -1  ! Peer closed connection
+        end if
 
+        res = set_nonblocking(sockfd, 0_c_int)
+    end subroutine
+
+    ! ==================================================================
+    ! Drain all pending data from a socket (discard stale bytes)
+    ! ==================================================================
+    subroutine net_drain_socket(sockfd)
+        integer(c_int), intent(in) :: sockfd
+        integer(c_int8_t), target :: trash(1024)
+        integer(c_int) :: n, res
+
+        res = set_nonblocking(sockfd, 1_c_int)
+        do
+            n = recv(sockfd, c_loc(trash), 1024_c_int, 0_c_int)
+            if (n <= 0) exit
+        end do
         res = set_nonblocking(sockfd, 0_c_int)
     end subroutine
 
@@ -456,7 +484,7 @@ contains
     ! got = .true. if a complete message was received.
     ! ==================================================================
     subroutine net_try_recv_msg(sockfd, recv_buf, recv_buf_size, recv_pos, &
-                                 msg_type, payload, max_payload, payload_len, got)
+                                 msg_type, payload, max_payload, payload_len, got, peer_closed)
         integer(c_int), intent(in)    :: sockfd
         integer(c_int8_t), intent(inout) :: recv_buf(*)
         integer, intent(in)           :: recv_buf_size
@@ -466,6 +494,7 @@ contains
         integer, intent(in)           :: max_payload
         integer, intent(out)          :: payload_len
         logical, intent(out)          :: got
+        logical, intent(out), optional :: peer_closed
 
         integer(c_int8_t), target :: tmp(1024)
         integer(c_int) :: nbytes
@@ -474,9 +503,14 @@ contains
         got = .false.
         msg_type = 0
         payload_len = 0
+        if (present(peer_closed)) peer_closed = .false.
 
         ! Try to receive more data
         call net_try_recv_bytes(sockfd, tmp, int(min(1024, recv_buf_size - recv_pos), c_int), nbytes)
+        if (nbytes == -1) then
+            if (present(peer_closed)) peer_closed = .true.
+            return
+        end if
         if (nbytes > 0) then
             recv_buf(recv_pos+1 : recv_pos+nbytes) = tmp(1:nbytes)
             recv_pos = recv_pos + nbytes

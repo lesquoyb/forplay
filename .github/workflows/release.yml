@@ -148,7 +148,12 @@ jobs:
       - name: Build (Windows)
         if: matrix.name == 'windows'
         shell: msys2 {0}
-        run: fpm build --profile release --flag "-D_WIN32" --link-flag "$GITHUB_WORKSPACE/forplay_res.o"
+        run: |
+          # Build server without -mwindows (needs console)
+          fpm build --profile release --flag "-D_WIN32" --link-flag "$GITHUB_WORKSPACE/forplay_res.o"
+          cp build/*/app/forplay-server.exe forplay-server.exe
+          # Rebuild client with -mwindows (no console)
+          fpm build --profile release --flag "-D_WIN32" --link-flag "-mwindows $GITHUB_WORKSPACE/forplay_res.o"
 
       - name: Build (Linux)
         if: matrix.name == 'linux'
@@ -169,8 +174,9 @@ jobs:
         shell: msys2 {0}
         run: |
           mkdir -p dist
-          # Find and copy the built executable
+          # Copy client (built with -mwindows) and server (saved earlier without -mwindows)
           find build -name "forplay.exe" -type f -exec cp {} dist/ \;
+          cp forplay-server.exe dist/
           # Bundle resources (fonts)
           cp -r resources/fonts dist/resources/
           cp resources/DejaVuSansMono.ttf dist/resources/

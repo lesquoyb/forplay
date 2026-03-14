@@ -72,7 +72,7 @@ program forplay
     ! Network state
     integer(c_int) :: server_fd  = -1
     integer(c_int) :: client_fd  = -1
-    integer(c_int) :: my_socket  = -1
+    integer(c_int) :: socket  = -1
     character(len=256) :: local_ip
     character(len=256) :: client_ip
     character(len=256) :: error_message
@@ -90,7 +90,7 @@ program forplay
     ! Game state
     type(game_state) :: gs
     logical :: am_host           ! .true. = I am the network host
-    logical :: am_hider          ! .true. = I play as the hider
+    integer :: player_index   ! 1-based index into gs%players
     integer(c_int) :: game_fd    ! socket for game communication
     logical :: game_ready        ! .true. once init data exchanged
 
@@ -101,8 +101,13 @@ program forplay
     integer :: cfg_speed_h, cfg_speed_s
     integer :: cfg_vision_h, cfg_vision_s
     logical :: cfg_reveal_h, cfg_reveal_s
-    logical :: cfg_host_hides
+    integer :: cfg_num_keys
+    integer :: cfg_turn_timer
     integer :: cfg_branch_pct  ! branch probability as integer 0-100 (percent)
+
+    ! Turn timer state
+    integer :: game_turn_timer = 0         ! seconds per turn, 0=disabled (from config)
+    integer(c_uint32_t) :: turn_start_tick = 0  ! SDL tick when current turn started
 
     ! Modal / end-game state
     logical :: show_quit_modal     ! confirmation dialog visible
@@ -130,12 +135,14 @@ program forplay
     character(len=32) :: lobby_player_name
 
     ! Room state (inside a room)
-    integer :: room_my_id              ! which room we're in (server-side ID)
+    integer :: room_id              ! which room we're in (server-side ID)
     type(server_config) :: room_cfg    ! current room config (from server)
     character(len=32) :: room_player_names(MAX_ROOM_PLAYERS)
     logical :: room_player_is_host(MAX_ROOM_PLAYERS)
+    integer :: room_player_teams(MAX_ROOM_PLAYERS)
     integer :: room_num_players
     logical :: room_i_am_host
+    integer :: room_teams_base_y = 0
 
     ! Embedded server (used when hosting via "Host a game")
     type(emb_server_type) :: emb_srv
@@ -147,7 +154,14 @@ program forplay
         end subroutine
         subroutine c_sdl_stop_text_input() bind(C, name="SDL_StopTextInput")
         end subroutine
+        function c_free_console() bind(C, name="FreeConsole") result(res)
+            import :: c_int
+            integer(c_int) :: res
+        end function
     end interface
+
+    ! Hide the console window on Windows
+    rc = c_free_console()
 
     ! ---- Initialize colours ----
     COL_WHITE  = sdl_color(uint8(255), uint8(255), uint8(255), uint8(SDL_ALPHA_OPAQUE))
@@ -212,7 +226,7 @@ program forplay
     local_ip          = ' '
     client_ip         = ' '
     am_host           = .false.
-    am_hider          = .false.
+    player_index   = 1
     game_fd           = -1
     game_ready        = .false.
     gs%initialized    = .false.
@@ -231,7 +245,8 @@ program forplay
     cfg_vision_s      = DEFAULT_VISION_S
     cfg_reveal_h      = .false.
     cfg_reveal_s      = .true.
-    cfg_host_hides    = .true.
+    cfg_num_keys      = 1
+    cfg_turn_timer    = 0
     cfg_branch_pct    = 5
     show_quit_modal   = .false.
     game_ended        = .false.
@@ -244,7 +259,7 @@ program forplay
     lobby_creating    = .false.
     lobby_room_name_input = ' '
     lobby_player_name = 'Player'
-    room_my_id        = 0
+    room_id        = 0
     room_num_players  = 0
     room_i_am_host    = .false.
 
@@ -273,6 +288,8 @@ program forplay
         if (current_page == PAGE_GAME .and. game_ready .and. &
             .not. game_ended) then
             call try_recv_opponent_action()
+            ! Auto-pass when turn timer expires
+            call check_turn_timer()
         end if
 
         ! Also check for opponent quit while in end-game or waiting
@@ -294,7 +311,7 @@ program forplay
     ! ---- Cleanup ----
     if (server_fd >= 0)  call net_close(server_fd)
     if (client_fd >= 0)  call net_close(client_fd)
-    if (my_socket >= 0)  call net_close(my_socket)
+    if (socket >= 0)  call net_close(socket)
     call net_cleanup()
     if (c_associated(title_font)) call ttf_close_font(title_font)
     if (c_associated(big_font)) call ttf_close_font(big_font)
@@ -311,23 +328,15 @@ contains
     ! =====================================================================
     function is_my_turn() result(mine)
         logical :: mine
-        if (am_hider) then
-            mine = (gs%turn == 0)   ! hider's turn
-        else
-            mine = (gs%turn == 1)   ! seeker's turn
-        end if
+        mine = (gs%current_player == player_index)
     end function
 
     ! =====================================================================
-    ! Helper: my role
+    ! Helper: my team
     ! =====================================================================
-    function my_role() result(r)
-        integer :: r
-        if (am_hider) then
-            r = ROLE_HIDER
-        else
-            r = ROLE_SEEKER
-        end if
+    function my_team() result(t)
+        integer :: t
+        t = gs%players(player_index)%team
     end function
 
     ! =====================================================================
@@ -526,38 +535,44 @@ contains
             if (mx >= 240 .and. mx <= 262) cfg_branch_pct = max(0, cfg_branch_pct - 1)
             if (mx >= 315 .and. mx <= 337) cfg_branch_pct = min(50, cfg_branch_pct + 1)
         end if
-        ! Row: Host hides toggle (y=328), toggle at x=240..300
+        ! Row: Num keys (y=328)
         if (my >= 315 .and. my <= 341) then
-            if (mx >= 240 .and. mx <= 300) cfg_host_hides = .not. cfg_host_hides
+            if (mx >= 240 .and. mx <= 262) cfg_num_keys = max(1, cfg_num_keys - 1)
+            if (mx >= 315 .and. mx <= 337) cfg_num_keys = min(MAX_KEYS, cfg_num_keys + 1)
+        end if
+        ! Row: Turn timer (y=354)
+        if (my >= 341 .and. my <= 367) then
+            if (mx >= 240 .and. mx <= 262) cfg_turn_timer = max(0, cfg_turn_timer - 5)
+            if (mx >= 315 .and. mx <= 337) cfg_turn_timer = min(120, cfg_turn_timer + 5)
         end if
 
         ! -- Bonuses block --
-        ! Row: Nb Dash (y=400)
-        if (my >= 387 .and. my <= 413) then
+        ! Row: Nb Dash (y=426)
+        if (my >= 413 .and. my <= 439) then
             if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_DASH) = max(0, cfg_item_counts(ITEM_DASH) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_DASH) = cfg_item_counts(ITEM_DASH) + 1
         end if
-        ! Row: Nb Vision (y=426)
-        if (my >= 413 .and. my <= 439) then
+        ! Row: Nb Vision (y=452)
+        if (my >= 439 .and. my <= 465) then
             if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_VISION) = max(0, cfg_item_counts(ITEM_VISION) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_VISION) = cfg_item_counts(ITEM_VISION) + 1
         end if
-        ! Row: Nb Light (y=452)
-        if (my >= 439 .and. my <= 465) then
+        ! Row: Nb Light (y=478)
+        if (my >= 465 .and. my <= 491) then
             if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_ILLUMINATE) = max(0, cfg_item_counts(ITEM_ILLUMINATE) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_ILLUMINATE) = cfg_item_counts(ITEM_ILLUMINATE) + 1
         end if
-        ! Row: Nb Speed (y=478)
-        if (my >= 465 .and. my <= 491) then
+        ! Row: Nb Speed (y=504)
+        if (my >= 491 .and. my <= 517) then
             if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_SPEED) = max(0, cfg_item_counts(ITEM_SPEED) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_SPEED) = cfg_item_counts(ITEM_SPEED) + 1
         end if
-        ! Row: Nb Pickaxe (y=504)
-        if (my >= 491 .and. my <= 517) then
+        ! Row: Nb Pickaxe (y=530)
+        if (my >= 517 .and. my <= 543) then
             if (mx >= 240 .and. mx <= 262) cfg_item_counts(ITEM_WALL_BREAK) = max(0, cfg_item_counts(ITEM_WALL_BREAK) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 cfg_item_counts(ITEM_WALL_BREAK) = cfg_item_counts(ITEM_WALL_BREAK) + 1
@@ -603,8 +618,8 @@ contains
         fx = SCREEN_W/2 - 175
         if (connecting) then
             if (mx>=SCREEN_W/2-100 .and. mx<=SCREEN_W/2+100 .and. my>=500 .and. my<=550) then
-                if (my_socket >= 0) then
-                    call net_close(my_socket); my_socket = -1
+                if (socket >= 0) then
+                    call net_close(socket); socket = -1
                 end if
                 connecting = .false.
                 call go_back_to_menu()
@@ -694,6 +709,7 @@ contains
             call game_do_pass(gs)
             call send_action(7, 0)   ! action_type=7 means pass
             call game_end_turn(gs)
+            call reset_turn_timer()
             if (gs%game_over .and. .not. game_ended) call handle_natural_game_over()
             return
         end if
@@ -702,9 +718,10 @@ contains
         if (gs%input_state == INPUT_MOVE) then
             d = key_to_dir(sym)
             if (d >= 0) then
-                if (game_do_move(gs, my_role(), d)) then
+                if (game_do_move(gs, player_index, d)) then
                     call send_action(0, d)   ! action_type = 0 (move)
                     call game_end_turn(gs)
+                    call reset_turn_timer()
                     if (gs%game_over .and. .not. game_ended) call handle_natural_game_over()
                 end if
                 return
@@ -722,10 +739,11 @@ contains
         if (gs%input_state == INPUT_ITEM_DIR) then
             d = key_to_dir(sym)
             if (d >= 0) then
-                call game_do_use_item(gs, my_role(), gs%selected_slot, d)
+                call game_do_use_item(gs, player_index, gs%selected_slot, d)
                 call send_action(gs%selected_slot, d)  ! action = slot, param = dir
                 gs%input_state = INPUT_MOVE
                 call game_end_turn(gs)
+                call reset_turn_timer()
                 if (gs%game_over .and. .not. game_ended) call handle_natural_game_over()
                 return
             end if
@@ -761,27 +779,20 @@ contains
         integer, intent(in) :: slot
         integer :: ni, itype
 
-        if (am_hider) then
-            ni = gs%hider%num_items
-        else
-            ni = gs%seeker%num_items
-        end if
+        ni = gs%players(player_index)%num_items
         if (slot > ni) return
 
-        if (am_hider) then
-            itype = gs%hider%inventory(slot)
-        else
-            itype = gs%seeker%inventory(slot)
-        end if
+        itype = gs%players(player_index)%inventory(slot)
 
         if (game_item_needs_direction(itype)) then
             gs%input_state   = INPUT_ITEM_DIR
             gs%selected_slot = slot
         else
             ! Use immediately (no direction needed)
-            call game_do_use_item(gs, my_role(), slot, 0)
+            call game_do_use_item(gs, player_index, slot, 0)
             call send_action(slot, 0)  ! slot>0 means item use
             call game_end_turn(gs)
+            call reset_turn_timer()
             if (gs%game_over .and. .not. game_ended) call handle_natural_game_over()
         end if
     end subroutine
@@ -829,7 +840,8 @@ contains
         cfg%vision_s    = cfg_vision_s
         cfg%reveal_h    = cfg_reveal_h
         cfg%reveal_s    = cfg_reveal_s
-        cfg%host_hides  = cfg_host_hides
+        cfg%num_keys    = cfg_num_keys
+        cfg%turn_timer  = cfg_turn_timer
         cfg%branch_pct  = cfg_branch_pct
     end subroutine
 
@@ -849,8 +861,8 @@ contains
         hosting_with_server = .true.
 
         ! Self-connect to localhost
-        call net_begin_connect('127.0.0.1', pv, my_socket, err)
-        if (my_socket < 0) then
+        call net_begin_connect('127.0.0.1', pv, socket, err)
+        if (socket < 0) then
             error_message = err
             call emb_server_shutdown(emb_srv)
             hosting_with_server = .false.
@@ -879,13 +891,13 @@ contains
             server_fd = -1  ! already closed by emb_server_shutdown
         end if
         if (server_fd >= 0) then; call net_close(server_fd); server_fd = -1; end if
-        ! Close client sockets (game_fd may alias my_socket, avoid double-close)
-        if (game_fd >= 0 .and. game_fd /= my_socket .and. game_fd /= client_fd) then
+        ! Close client sockets (game_fd may alias socket, avoid double-close)
+        if (game_fd >= 0 .and. game_fd /= socket .and. game_fd /= client_fd) then
             call net_close(game_fd)
         end if
         game_fd = -1
         if (client_fd >= 0) then; call net_close(client_fd); client_fd = -1; end if
-        if (my_socket >= 0) then; call net_close(my_socket); my_socket = -1; end if
+        if (socket >= 0) then; call net_close(socket); socket = -1; end if
         waiting_for_client = .false.
         client_connected   = .false.
         connecting         = .false.
@@ -910,8 +922,8 @@ contains
         read(input_port, *, err=99) pi
         pv = int(pi, c_int16_t)
         error_message = ' '
-        call net_begin_connect(trim(input_ip), pv, my_socket, err)
-        if (my_socket < 0) then; error_message = err; return; end if
+        call net_begin_connect(trim(input_ip), pv, socket, err)
+        if (socket < 0) then; error_message = err; return; end if
         ! Connect started — poll each frame until done
         connecting = .true.
         connect_start_tick = sdl_get_ticks()
@@ -927,13 +939,13 @@ contains
 
         elapsed = sdl_get_ticks() - connect_start_tick
 
-        call net_poll_connect(my_socket, res, err)
+        call net_poll_connect(socket, res, err)
 
         if (res == 1) then
             ! Connected!
             connecting = .false.
             am_host    = .false.
-            game_fd    = my_socket
+            game_fd    = socket
             game_ready = .false.
             gs%initialized = .false.
             recv_init_pos = 0
@@ -962,9 +974,9 @@ contains
             ! Still pending — check timeout
             if (elapsed > CONNECT_TIMEOUT_MS) then
                 connecting = .false.
-                if (my_socket >= 0) then
-                    call net_close(my_socket)
-                    my_socket = -1
+                if (socket >= 0) then
+                    call net_close(socket)
+                    socket = -1
                 end if
                 error_message = 'Error: connection timed out'
             end if
@@ -1045,14 +1057,15 @@ contains
     ! End game: send quit message, reveal map
     ! =====================================================================
     subroutine end_game_with_quit()
-        ! Send quit action (action_type=8) to opponent
+        integer :: j
+        ! Send quit action (action_type=8)
         call send_action(8, 0)
 
-        ! Reveal whole map
-        gs%h_visible(1:gs%maze%w, 1:gs%maze%h) = .true.
-        gs%s_visible(1:gs%maze%w, 1:gs%maze%h) = .true.
-        gs%h_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
-        gs%s_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
+        ! Reveal whole map for all players
+        do j = 1, gs%num_players
+            gs%visible(1:gs%maze%w, 1:gs%maze%h, j) = .true.
+            gs%visited(1:gs%maze%w, 1:gs%maze%h, j) = .true.
+        end do
         gs%game_over = .true.
         game_ended   = .true.
         game_ended_by_quit = .true.
@@ -1063,17 +1076,18 @@ contains
     ! Handle natural game over (seeker caught hider)
     ! =====================================================================
     subroutine handle_natural_game_over()
+        integer :: j
         ! Reveal whole map for everyone
-        gs%h_visible(1:gs%maze%w, 1:gs%maze%h) = .true.
-        gs%s_visible(1:gs%maze%w, 1:gs%maze%h) = .true.
-        gs%h_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
-        gs%s_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
+        do j = 1, gs%num_players
+            gs%visible(1:gs%maze%w, 1:gs%maze%h, j) = .true.
+            gs%visited(1:gs%maze%w, 1:gs%maze%h, j) = .true.
+        end do
         game_ended = .true.
         game_ended_by_quit = .false.
-        if (gs%seeker_won) then
-            endgame_msg = 'The seeker wins!'
+        if (gs%seekers_won) then
+            endgame_msg = 'The labyrinth team wins!'
         else
-            endgame_msg = 'The hider wins!'
+            endgame_msg = 'The escape team wins!'
         end if
     end subroutine
 
@@ -1081,10 +1095,10 @@ contains
     ! Try receiving end/restart messages when in end-game state
     ! =====================================================================
     subroutine try_recv_end_message()
-        integer :: atype, param
+        integer :: atype, param, pidx
         logical :: got
 
-        call server_try_recv_action(game_fd, atype, param, got)
+        call server_try_recv_action(game_fd, pidx, atype, param, got)
         if (.not. got) return
 
         if (atype == 9) then
@@ -1120,16 +1134,27 @@ contains
     ! =====================================================================
     subroutine restart_game()
         integer(c_int) :: st
+        integer :: player_teams(MAX_PLAYERS)
         if (.not. am_host) return
 
-        ! Sync config from UI variables
         call sync_cfg_to_server_config()
 
-        call server_restart_game(game_fd, gs, cfg, st)
+        ! Send restart signal to peer
+        call server_send_action(game_fd, 0, 9, 0)
+
+        ! Regenerate game (legacy 2-player: host=escape, peer=labyrinth)
+        player_teams(1) = TEAM_ESCAPE
+        player_teams(2) = TEAM_LABYRINTH
+        call server_init_game(gs, cfg, 2, player_teams)
+
+        ! Send new init to peer (player 2)
+        call server_send_init_to_fd(game_fd, gs, 2, st)
 
         game_ready   = .true.
         game_ended   = .false.
         show_quit_modal = .false.
+        game_turn_timer = cfg%turn_timer
+        call reset_turn_timer()
         print *, '[HOST] game restarted'
     end subroutine
 
@@ -1138,23 +1163,27 @@ contains
     ! =====================================================================
     subroutine launch_game_as_host()
         integer(c_int) :: st
-        ! Host generates maze and sends init data to client
+        integer :: player_teams(MAX_PLAYERS)
+        ! Host generates maze and sends init data to client (legacy 2-player direct host)
         am_host = .true.
-        am_hider = cfg_host_hides
+        player_index = 1
         game_fd = client_fd
         print *, '[HOST] launch_game_as_host: game_fd=', game_fd
 
-        ! Sync config from UI variables
         call sync_cfg_to_server_config()
 
-        call server_init_game(gs, cfg)
+        player_teams(1) = TEAM_ESCAPE
+        player_teams(2) = TEAM_LABYRINTH
+        call server_init_game(gs, cfg, 2, player_teams)
         print *, '[HOST] game_init done, maze=', gs%maze%w, 'x', gs%maze%h, &
                  ' items=', gs%num_items
 
-        call server_send_init_to_fd(game_fd, gs, cfg%host_hides, st)
+        call server_send_init_to_fd(game_fd, gs, 2, st)
         print *, '[HOST] send_game_init: status=', st
 
         game_ready   = .true.
+        game_turn_timer = cfg%turn_timer
+        call reset_turn_timer()
         current_page = PAGE_GAME
         print *, '[HOST] game launched, page=PAGE_GAME'
     end subroutine
@@ -1162,7 +1191,7 @@ contains
     ! Send full game state from host to client (uses server module)
     subroutine send_game_init()
         integer(c_int) :: st
-        call server_send_init_to_fd(game_fd, gs, am_hider, st)
+        call server_send_init_to_fd(game_fd, gs, 2, st)
         print *, '[HOST] send_game_init: status=', st
     end subroutine
 
@@ -1184,59 +1213,83 @@ contains
         if (recv_init_pos < 10) return   ! not enough data yet
 
         ! Try parsing the accumulated buffer
-        call server_parse_init_packet(recv_init_buf, recv_init_pos, gs, am_hider, needed)
+        call server_parse_init_packet(recv_init_buf, recv_init_pos, gs, player_index, needed)
         if (needed > 0) then
             print *, '[CLIENT] need', needed, 'bytes, have', recv_init_pos
             return
         end if
 
-        print *, '[CLIENT] full init received and parsed'
+        print *, '[CLIENT] full init received, I am player', player_index
         game_ready = .true.
+        game_turn_timer = room_cfg%turn_timer
+        call reset_turn_timer()
     end subroutine
 
-    ! Send an action to the opponent: 2 bytes [action_type, param]
+    ! Send an action: 3 bytes [player_index, action_type, param]
     subroutine send_action(action_type, param)
         integer, intent(in) :: action_type, param
-        call server_send_action(game_fd, action_type, param)
+        call server_send_action(game_fd, player_index, action_type, param)
     end subroutine
 
-    ! Try to receive opponent's action (non-blocking)
+    ! Reset the turn timer (call after every turn change and at game start)
+    subroutine reset_turn_timer()
+        turn_start_tick = sdl_get_ticks()
+    end subroutine
+
+    ! Check if turn timer has expired and auto-pass if so
+    subroutine check_turn_timer()
+        integer(c_uint32_t) :: elapsed_ms
+
+        if (game_turn_timer <= 0) return
+        if (.not. is_my_turn()) return
+        if (gs%game_over) return
+        if (show_quit_modal) return
+
+        elapsed_ms = sdl_get_ticks() - turn_start_tick
+        if (elapsed_ms >= int(game_turn_timer, c_uint32_t) * 1000_c_uint32_t) then
+            ! Consume all remaining actions at once
+            do while (is_my_turn() .and. .not. gs%game_over)
+                call game_do_pass(gs)
+                call send_action(7, 0)
+                call game_end_turn(gs)
+            end do
+            call reset_turn_timer()
+            if (gs%game_over .and. .not. game_ended) call handle_natural_game_over()
+        end if
+    end subroutine
+
+    ! Try to receive another player's action (non-blocking)
     subroutine try_recv_opponent_action()
-        integer :: atype, param, opp_role
+        integer :: atype, param, pidx, j
         logical :: moved, got
 
-        call server_try_recv_action(game_fd, atype, param, got)
+        call server_try_recv_action(game_fd, pidx, atype, param, got)
         if (.not. got) return
-
-        if (am_hider) then
-            opp_role = ROLE_SEEKER
-        else
-            opp_role = ROLE_HIDER
-        end if
 
         if (atype == 0) then
             ! Move
-            moved = game_do_move(gs, opp_role, param)
+            moved = game_do_move(gs, pidx, param)
         else if (atype == 7) then
             ! Pass turn
             call game_do_pass(gs)
         else if (atype == 8) then
-            ! Opponent quit
-            gs%h_visible(1:gs%maze%w, 1:gs%maze%h) = .true.
-            gs%s_visible(1:gs%maze%w, 1:gs%maze%h) = .true.
-            gs%h_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
-            gs%s_visited(1:gs%maze%w, 1:gs%maze%h) = .true.
+            ! A player quit - reveal map and end game
+            do j = 1, gs%num_players
+                gs%visible(1:gs%maze%w, 1:gs%maze%h, j) = .true.
+                gs%visited(1:gs%maze%w, 1:gs%maze%h, j) = .true.
+            end do
             gs%game_over = .true.
             game_ended   = .true.
             game_ended_by_quit = .true.
-            endgame_msg  = 'Opponent has quit'
+            endgame_msg  = 'A player has quit'
             return
         else
             ! Item use: atype = slot, param = direction
-            call game_do_use_item(gs, opp_role, atype, param)
+            call game_do_use_item(gs, pidx, atype, param)
         end if
 
         call game_end_turn(gs)
+        call reset_turn_timer()
 
         ! Check if game ended naturally
         if (gs%game_over .and. .not. game_ended) then
@@ -1316,7 +1369,8 @@ contains
         call draw_param_row_at(20, ly, 'Height',    cfg_maze_h);  ly = ly + 26
         call draw_param_row_at(20, ly, 'Min dist.', cfg_min_dist); ly = ly + 26
         call draw_param_row_at(20, ly, 'Branch %',  cfg_branch_pct); ly = ly + 26
-        call draw_toggle_row_at(20, ly, 'Host hides', cfg_host_hides); ly = ly + 26
+        call draw_param_row_at(20, ly, 'Num keys',  cfg_num_keys); ly = ly + 26
+        call draw_param_row_at(20, ly, 'Turn timer', cfg_turn_timer); ly = ly + 26
 
         ! --- Bonuses block ---
         ly = ly + 8
@@ -1334,7 +1388,7 @@ contains
 
         ! ===== RIGHT COLUMN =====
         ! --- Hider block ---
-        call draw_text_at(sml_font, '--- Hider ---', COL_GRAY, 410, 180)
+        call draw_text_at(sml_font, '--- Escape ---', COL_GRAY, 410, 180)
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(80), uint8(80), uint8(100), uint8(255))
         rc = sdl_render_draw_line(main_renderer, 410, 200, 770, 200)
@@ -1344,9 +1398,9 @@ contains
         call draw_param_row_at(410, ry, 'Vision', cfg_vision_h); ry = ry + 26
         call draw_toggle_row_at(410, ry, 'Maze revealed', cfg_reveal_h); ry = ry + 26
 
-        ! --- Seeker block ---
+        ! --- Labyrinth block ---
         ry = ry + 8
-        call draw_text_at(sml_font, '--- Seeker ---', COL_GRAY, 410, ry)
+        call draw_text_at(sml_font, '--- Labyrinth ---', COL_GRAY, 410, ry)
         ry = ry + 20
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(80), uint8(80), uint8(100), uint8(255))
@@ -1463,25 +1517,26 @@ contains
             if (my >= 237 .and. my <= 263) tip = 'Number of rows (odd recommended)'
             if (my >= 263 .and. my <= 289) tip = 'Min distance in cells between spawns'
             if (my >= 289 .and. my <= 315) tip = 'Extra wall removals (0=perfect maze, 50=very open)'
-            if (my >= 315 .and. my <= 341) tip = 'Host plays as the hider (Yes) or seeker (No)'
-            ! Bonuses block: rows at y=400,426,452,478,504
-            if (my >= 387 .and. my <= 413) tip = 'Dash forward in a straight line, reveals path'
-            if (my >= 413 .and. my <= 439) tip = 'Vision radius +1 to +3 (random, permanent)'
-            if (my >= 439 .and. my <= 465) tip = 'Reveals the entire map for this turn'
-            if (my >= 465 .and. my <= 491) tip = '+1 action per turn (permanent)'
-            if (my >= 491 .and. my <= 517) tip = 'Break an adjacent wall in a given direction'
+            if (my >= 315 .and. my <= 341) tip = 'Number of keys the escape team must find to win'
+            if (my >= 341 .and. my <= 367) tip = 'Auto-pass after N seconds (0=disabled)'
+            ! Bonuses block: rows at y=426,452,478,504,530
+            if (my >= 413 .and. my <= 439) tip = 'Dash forward in a straight line, reveals path'
+            if (my >= 439 .and. my <= 465) tip = 'Vision radius +1 to +3 (random, permanent)'
+            if (my >= 465 .and. my <= 491) tip = 'Reveals the entire map for this turn'
+            if (my >= 491 .and. my <= 517) tip = '+1 action per turn (permanent)'
+            if (my >= 517 .and. my <= 543) tip = 'Break an adjacent wall in a given direction'
         end if
 
         ! --- Right column (x 410..770) ---
         if (mx >= 410 .and. mx <= 770) then
             ! Hider block: rows at y=224,250,276
-            if (my >= 211 .and. my <= 237) tip = 'Actions per turn for the hider'
-            if (my >= 237 .and. my <= 263) tip = 'Vision radius at game start for the hider'
-            if (my >= 263 .and. my <= 289) tip = 'Hider sees the full maze layout from start'
+            if (my >= 211 .and. my <= 237) tip = 'Actions per turn for the escape team'
+            if (my >= 237 .and. my <= 263) tip = 'Vision radius at game start for the escape team'
+            if (my >= 263 .and. my <= 289) tip = 'Escape team sees the full maze layout from start'
             ! Seeker block: rows at y=348,374,400
-            if (my >= 335 .and. my <= 361) tip = 'Actions per turn for the seeker'
-            if (my >= 361 .and. my <= 387) tip = 'Vision radius at game start for the seeker'
-            if (my >= 387 .and. my <= 413) tip = 'Seeker sees the full maze layout from start'
+            if (my >= 335 .and. my <= 361) tip = 'Actions per turn for the labyrinth team'
+            if (my >= 361 .and. my <= 387) tip = 'Vision radius at game start for the labyrinth team'
+            if (my >= 387 .and. my <= 413) tip = 'Labyrinth team sees the full maze layout from start'
         end if
 
         if (len_trim(tip) == 0) return
@@ -1579,47 +1634,34 @@ contains
     subroutine render_maze()
         integer :: csz, ox, oy   ! cell size, offset x/y
         integer :: ix, iy, sx, sy, c
-        logical :: is_vis, is_mem, show_cell, my_reveal
-        integer :: i
+        logical :: is_vis, is_mem, show_cell, reveal
+        integer :: i, pidx
 
         call get_maze_layout(csz, ox, oy)
 
-        ! Determine if the local player has maze reveal
-        if (am_hider) then
-            my_reveal = gs%h_reveal
-        else
-            my_reveal = gs%s_reveal
-        end if
+        pidx = player_index
+        reveal = gs%players(pidx)%reveal
 
         do iy = 1, gs%maze%h
             do ix = 1, gs%maze%w
-                ! Determine visibility for the current player's view
-                if (am_hider) then
-                    is_vis = gs%h_visible(ix, iy)
-                    is_mem = gs%h_visited(ix, iy)
-                else
-                    is_vis = gs%s_visible(ix, iy)
-                    is_mem = gs%s_visited(ix, iy)
-                end if
+                is_vis = gs%visible(ix, iy, pidx)
+                is_mem = gs%visited(ix, iy, pidx)
 
-                ! show_cell: if maze is revealed, always show walls
-                if (my_reveal) then
+                if (reveal) then
                     show_cell = .true.
                 else
                     show_cell = is_vis .or. is_mem
                 end if
 
-                if (.not. show_cell) cycle   ! unseen cell
+                if (.not. show_cell) cycle
 
                 sx = ox + (ix - 1) * csz
                 sy = oy + (iy - 1) * csz
                 c  = gs%maze%cells(ix, iy)
 
-                ! Draw floor
                 call draw_cell_floor(sx, sy, csz, is_vis)
 
-                ! Draw walls (bright if visible or if maze is revealed)
-                if (my_reveal) then
+                if (reveal) then
                     call draw_cell_walls(sx, sy, csz, c, .true.)
                 else
                     call draw_cell_walls(sx, sy, csz, c, is_vis)
@@ -1627,28 +1669,24 @@ contains
 
                 ! Draw ground items
                 if (is_vis) then
-                    ! Currently visible: show real state
                     do i = 1, gs%num_items
                         if (gs%items(i)%active .and. &
                             gs%items(i)%x == ix .and. gs%items(i)%y == iy) then
                             call draw_ground_item(sx, sy, csz, gs%items(i)%itype)
                         end if
                     end do
-                    ! Draw key if visible and active
-                    if (gs%key_active .and. gs%key_x == ix .and. gs%key_y == iy) then
-                        call draw_key(sx, sy, csz)
-                    end if
+                    ! Draw keys if visible and active
+                    do i = 1, gs%num_keys
+                        if (gs%key_active(i) .and. gs%key_x(i) == ix .and. gs%key_y(i) == iy) then
+                            call draw_key(sx, sy, csz)
+                        end if
+                    end do
                 else
                     ! Not visible: show dimmed item if previously seen
                     do i = 1, gs%num_items
                         if (gs%items(i)%x == ix .and. gs%items(i)%y == iy) then
-                            if (am_hider) then
-                                if (gs%h_item_seen(i)) &
-                                    call draw_ground_item_dimmed(sx, sy, csz, gs%items(i)%itype)
-                            else
-                                if (gs%s_item_seen(i)) &
-                                    call draw_ground_item_dimmed(sx, sy, csz, gs%items(i)%itype)
-                            end if
+                            if (gs%item_seen(i, pidx)) &
+                                call draw_ground_item_dimmed(sx, sy, csz, gs%items(i)%itype)
                         end if
                     end do
                 end if
@@ -1849,82 +1887,87 @@ contains
     ! Player rendering
     ! -----------------------------------------------------------------
     subroutine render_players()
-        integer :: csz, ox, oy, sx, sy, pad
+        integer :: csz, ox, oy, sx, sy, pad, i, mi
         type(sdl_rect) :: pr
-        logical :: opp_vis
 
         call get_maze_layout(csz, ox, oy)
         pad = csz / 5
         if (pad < 2) pad = 2
+        mi = player_index
 
-        if (am_hider) then
-            ! I'm the hider -- always draw myself (red)
-            sx = ox + (gs%hider%x - 1) * csz
-            sy = oy + (gs%hider%y - 1) * csz
-            pr = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
-            rc = sdl_set_render_draw_color(main_renderer, &
-                    uint8(220), uint8(50), uint8(50), uint8(255))
-            rc = sdl_render_fill_rect(main_renderer, pr)
-
-            ! Draw seeker (opponent) -- real or ghost
-            opp_vis = gs%h_visible(gs%seeker%x, gs%seeker%y)
-            if (opp_vis) then
-                sx = ox + (gs%seeker%x - 1) * csz
-                sy = oy + (gs%seeker%y - 1) * csz
+        do i = 1, gs%num_players
+            if (gs%players(i)%captured) then
+                ! Tombstone: always visible, drawn as dark cross
+                sx = ox + (gs%players(i)%x - 1) * csz
+                sy = oy + (gs%players(i)%y - 1) * csz
                 pr = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
                 rc = sdl_set_render_draw_color(main_renderer, &
-                        uint8(50), uint8(120), uint8(255), uint8(255))
+                        uint8(90), uint8(90), uint8(90), uint8(180))
                 rc = sdl_render_fill_rect(main_renderer, pr)
-            else if (gs%h_opp_seen) then
-                ! Ghost at last known position
-                sx = ox + (gs%h_last_opp_x - 1) * csz
-                sy = oy + (gs%h_last_opp_y - 1) * csz
-                pr = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
-                rc = sdl_set_render_draw_color(main_renderer, &
-                        uint8(50), uint8(80), uint8(140), uint8(120))
-                rc = sdl_render_fill_rect(main_renderer, pr)
+                if (csz >= 16) then
+                    call draw_text_centered('X', sml_font, COL_DIM, &
+                                            sx + csz/2, sy + csz/2 - sml_font_h/2)
+                end if
+                cycle
             end if
-        else
-            ! I'm the seeker -- always draw myself (blue)
-            sx = ox + (gs%seeker%x - 1) * csz
-            sy = oy + (gs%seeker%y - 1) * csz
-            pr = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
-            rc = sdl_set_render_draw_color(main_renderer, &
-                    uint8(50), uint8(120), uint8(255), uint8(255))
-            rc = sdl_render_fill_rect(main_renderer, pr)
 
-            ! Draw hider (opponent) -- real or ghost
-            opp_vis = gs%s_visible(gs%hider%x, gs%hider%y)
-            if (opp_vis) then
-                sx = ox + (gs%hider%x - 1) * csz
-                sy = oy + (gs%hider%y - 1) * csz
+            if (i == mi) then
+                ! Always draw myself
+                sx = ox + (gs%players(i)%x - 1) * csz
+                sy = oy + (gs%players(i)%y - 1) * csz
                 pr = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
-                rc = sdl_set_render_draw_color(main_renderer, &
-                        uint8(220), uint8(50), uint8(50), uint8(255))
+                if (gs%players(i)%team == TEAM_ESCAPE) then
+                    rc = sdl_set_render_draw_color(main_renderer, &
+                            uint8(220), uint8(50), uint8(50), uint8(255))
+                else
+                    rc = sdl_set_render_draw_color(main_renderer, &
+                            uint8(50), uint8(120), uint8(255), uint8(255))
+                end if
                 rc = sdl_render_fill_rect(main_renderer, pr)
-            else if (gs%s_opp_seen) then
-                ! Ghost at last known position
-                sx = ox + (gs%s_last_opp_x - 1) * csz
-                sy = oy + (gs%s_last_opp_y - 1) * csz
-                pr = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
-                rc = sdl_set_render_draw_color(main_renderer, &
-                        uint8(140), uint8(50), uint8(50), uint8(120))
-                rc = sdl_render_fill_rect(main_renderer, pr)
+            else
+                ! Other player: show if visible, else ghost
+                if (gs%visible(gs%players(i)%x, gs%players(i)%y, mi)) then
+                    sx = ox + (gs%players(i)%x - 1) * csz
+                    sy = oy + (gs%players(i)%y - 1) * csz
+                    pr = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
+                    if (gs%players(i)%team == TEAM_ESCAPE) then
+                        rc = sdl_set_render_draw_color(main_renderer, &
+                                uint8(220), uint8(50), uint8(50), uint8(255))
+                    else
+                        rc = sdl_set_render_draw_color(main_renderer, &
+                                uint8(50), uint8(120), uint8(255), uint8(255))
+                    end if
+                    rc = sdl_render_fill_rect(main_renderer, pr)
+                else if (gs%has_seen(i, mi)) then
+                    ! Ghost at last known position
+                    sx = ox + (gs%last_seen_x(i, mi) - 1) * csz
+                    sy = oy + (gs%last_seen_y(i, mi) - 1) * csz
+                    pr = sdl_rect(sx + pad, sy + pad, csz - 2*pad, csz - 2*pad)
+                    if (gs%players(i)%team == TEAM_ESCAPE) then
+                        rc = sdl_set_render_draw_color(main_renderer, &
+                                uint8(140), uint8(50), uint8(50), uint8(120))
+                    else
+                        rc = sdl_set_render_draw_color(main_renderer, &
+                                uint8(50), uint8(80), uint8(140), uint8(120))
+                    end if
+                    rc = sdl_render_fill_rect(main_renderer, pr)
+                end if
             end if
-        end if
+        end do
     end subroutine
 
     ! -----------------------------------------------------------------
     ! HUD rendering (bottom bar: inventory + info)
     ! -----------------------------------------------------------------
     subroutine render_hud()
-        integer :: hud_y, i, bx, ni, itype, spd, act
+        integer :: hud_y, i, bx, ni, itype, spd, act, mi
         type(sdl_rect) :: hr, ir
         character(len=64) :: label
         type(sdl_color) :: icol
         character(len=1) :: num_ch
 
         hud_y = GAME_AREA_H
+        mi = player_index
 
         ! HUD background
         hr = sdl_rect(0, hud_y, SCREEN_W, HUD_H)
@@ -1937,44 +1980,30 @@ contains
                 uint8(100), uint8(100), uint8(120), uint8(255))
         rc = sdl_render_draw_line(main_renderer, 0, hud_y, SCREEN_W, hud_y)
 
-        ! Show role
-        if (am_hider) then
-            call draw_text_at(sml_font, 'Role: Hider', COL_RED, 15, hud_y + 5)
+        ! Show team
+        if (my_team() == TEAM_ESCAPE) then
+            call draw_text_at(sml_font, 'Escape team', COL_RED, 15, hud_y + 5)
         else
-            call draw_text_at(sml_font, 'Role: Seeker', COL_CYAN, 15, hud_y + 5)
+            call draw_text_at(sml_font, 'Labyrinth team', COL_CYAN, 15, hud_y + 5)
         end if
 
         ! Show inventory
-        if (am_hider) then
-            ni = gs%hider%num_items
-        else
-            ni = gs%seeker%num_items
-        end if
+        ni = gs%players(mi)%num_items
 
         call draw_text_at(sml_font, 'Items:', COL_GRAY, 15, hud_y + 30)
         bx = 110
         do i = 1, MAX_INVENTORY
-            ! Draw slot
             ir = sdl_rect(bx, hud_y + 28, 50, 28)
             if (i <= ni) then
-                if (am_hider) then
-                    itype = gs%hider%inventory(i)
-                else
-                    itype = gs%seeker%inventory(i)
-                end if
-                if (itype == ITEM_VISION .or. itype == ITEM_SPEED) then
-                    ! Skip drawing vision/speed (should never be present, but just in case)
-                    cycle
-                end if
+                itype = gs%players(mi)%inventory(i)
+                if (itype == ITEM_VISION .or. itype == ITEM_SPEED) cycle
                 call item_color(itype, icol)
                 rc = sdl_set_render_draw_color(main_renderer, &
                         icol%r, icol%g, icol%b, uint8(200))
                 rc = sdl_render_fill_rect(main_renderer, ir)
-                ! Item letter + slot number
                 write(num_ch, '(I1)') i
                 call draw_text_centered(num_ch, sml_font, COL_WHITE, &
                                         bx + 25, hud_y + 30)
-                ! Highlight selected item slot
                 if (gs%input_state == INPUT_ITEM_DIR .and. gs%selected_slot == i) then
                     rc = sdl_set_render_draw_color(main_renderer, &
                             uint8(255), uint8(255), uint8(255), uint8(255))
@@ -1985,25 +2014,21 @@ contains
                         uint8(40), uint8(40), uint8(50), uint8(255))
                 rc = sdl_render_fill_rect(main_renderer, ir)
             end if
-            ! Slot border
             rc = sdl_set_render_draw_color(main_renderer, &
                     uint8(80), uint8(80), uint8(90), uint8(255))
             rc = sdl_render_draw_rect(main_renderer, ir)
             bx = bx + 56
         end do
 
-        ! --- End-game HUD: buttons replace normal right-side info ---
+        ! --- End-game HUD ---
         if (game_ended) then
-            ! Show turn count
             write(label, '(A,I0)') 'Turn: ', gs%turn_number
             call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 5)
 
             if (game_ended_by_quit) then
-                ! Quit scenario: "Back to room" + "Back to menu"
                 call draw_button(15, hud_y + 45, 190, 35, 'Back to room', COL_CYAN)
                 call draw_button(220, hud_y + 45, 190, 35, 'Back to menu', COL_RED)
             else
-                ! Natural game over: role-dependent buttons
                 if (room_i_am_host) then
                     call draw_button(15, hud_y + 45, 150, 35, 'Replay', COL_GREEN)
                     call draw_button(180, hud_y + 45, 190, 35, 'Back to room', COL_CYAN)
@@ -2017,14 +2042,10 @@ contains
             return
         end if
 
-        ! --- Normal HUD right-side info ---
-        ! Turn indicator + actions remaining (bottom-left, under items)
+        ! --- Normal HUD ---
         if (is_my_turn() .and. .not. gs%game_over) then
-            if (am_hider) then
-                spd = gs%hider%speed; act = gs%hider%actions_left
-            else
-                spd = gs%seeker%speed; act = gs%seeker%actions_left
-            end if
+            spd = gs%players(mi)%speed
+            act = gs%players(mi)%actions_left
             if (spd > 1) then
                 write(label, '(A,I0,A,I0,A)') &
                     'YOUR TURN  (', act, '/', spd, ' actions)'
@@ -2033,24 +2054,38 @@ contains
             end if
             call draw_text_at(sml_font, trim(label), COL_GREEN, 15, hud_y + 62)
         else if (.not. gs%game_over) then
-            call draw_text_at(sml_font, 'Opponent''s turn...', COL_GRAY, 15, hud_y + 62)
+            write(label, '(A,I0,A)') 'Player ', gs%current_player, '''s turn...'
+            call draw_text_at(sml_font, trim(label), COL_GRAY, 15, hud_y + 62)
+        end if
+
+        ! Turn timer countdown
+        if (game_turn_timer > 0 .and. .not. gs%game_over) then
+            block
+                integer :: secs_left
+                secs_left = game_turn_timer - &
+                    int((sdl_get_ticks() - turn_start_tick) / 1000_c_uint32_t)
+                if (secs_left < 0) secs_left = 0
+                write(label, '(A,I0,A)') 'Timer: ', secs_left, 's'
+                if (secs_left <= 3) then
+                    call draw_text_at(sml_font, trim(label), COL_RED, 620, hud_y + 62)
+                else
+                    call draw_text_at(sml_font, trim(label), COL_YELLOW, 620, hud_y + 62)
+                end if
+            end block
         end if
 
         ! Vision radius + speed
-        if (am_hider) then
-            write(label, '(A,I0)') 'Vision: ', gs%hider%vision_radius
-            call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 30)
-            if (gs%hider%speed > 1) then
-                write(label, '(A,I0)') 'Speed: ', gs%hider%speed
-                call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 30)
-            end if
-        else
-            write(label, '(A,I0)') 'Vision: ', gs%seeker%vision_radius
-            call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 30)
-            if (gs%seeker%speed > 1) then
-                write(label, '(A,I0)') 'Speed: ', gs%seeker%speed
-                call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 30)
-            end if
+        write(label, '(A,I0)') 'Vision: ', gs%players(mi)%vision_radius
+        call draw_text_at(sml_font, trim(label), COL_GRAY, 470, hud_y + 30)
+        if (gs%players(mi)%speed > 1) then
+            write(label, '(A,I0)') 'Speed: ', gs%players(mi)%speed
+            call draw_text_at(sml_font, trim(label), COL_GRAY, 620, hud_y + 30)
+        end if
+
+        ! Keys info (escape team objective)
+        if (gs%num_keys > 0) then
+            write(label, '(A,I0,A,I0)') 'Keys: ', gs%keys_found, '/', gs%num_keys
+            call draw_text_at(sml_font, trim(label), COL_YELLOW, 470, hud_y + 5)
         end if
 
         ! Turn number
@@ -2086,7 +2121,7 @@ contains
     subroutine render_game_tooltip()
         integer(kind=c_int) :: mx_c, my_c
         integer(kind=c_uint32_t) :: btn_state
-        integer :: mx, my, i, slot, itype, ni
+        integer :: mx, my, i, slot, itype, ni, mi
         integer :: csz, ox, oy, cell_x, cell_y
         character(len=80) :: tip
         type(sdl_surface), pointer :: surf
@@ -2097,22 +2132,14 @@ contains
         btn_state = sdl_get_mouse_state(mx_c, my_c)
         mx = int(mx_c); my = int(my_c)
         tip = ' '
+        mi = player_index
 
         ! --- Check HUD inventory slots ---
-        ! Slots start at x=110, y=GAME_AREA_H+28, each 50 wide, 28 tall, spaced 56px
         if (my >= GAME_AREA_H + 28 .and. my <= GAME_AREA_H + 56) then
-            if (am_hider) then
-                ni = gs%hider%num_items
-            else
-                ni = gs%seeker%num_items
-            end if
+            ni = gs%players(mi)%num_items
             do slot = 1, ni
                 if (mx >= 110 + (slot-1)*56 .and. mx < 110 + (slot-1)*56 + 50) then
-                    if (am_hider) then
-                        itype = gs%hider%inventory(slot)
-                    else
-                        itype = gs%seeker%inventory(slot)
-                    end if
+                    itype = gs%players(mi)%inventory(slot)
                     tip = trim(game_item_name(itype)) // ': ' // &
                           trim(game_item_description(itype))
                     exit
@@ -2128,9 +2155,7 @@ contains
                 cell_y = (my - oy) / csz + 1
                 if (cell_x >= 1 .and. cell_x <= gs%maze%w .and. &
                     cell_y >= 1 .and. cell_y <= gs%maze%h) then
-                    ! Show tooltip for items in currently visible cells
-                    if ((am_hider .and. gs%h_visible(cell_x, cell_y)) .or. &
-                        (.not. am_hider .and. gs%s_visible(cell_x, cell_y))) then
+                    if (gs%visible(cell_x, cell_y, mi)) then
                         do i = 1, gs%num_items
                             if (gs%items(i)%active .and. &
                                 gs%items(i)%x == cell_x .and. &
@@ -2141,14 +2166,11 @@ contains
                                 exit
                             end if
                         end do
-                    ! Also show tooltip for remembered items in fog of war
-                    else if ((am_hider .and. gs%h_visited(cell_x, cell_y)) .or. &
-                             (.not. am_hider .and. gs%s_visited(cell_x, cell_y))) then
+                    else if (gs%visited(cell_x, cell_y, mi)) then
                         do i = 1, gs%num_items
                             if (gs%items(i)%x == cell_x .and. &
                                 gs%items(i)%y == cell_y) then
-                                if ((am_hider .and. gs%h_item_seen(i)) .or. &
-                                    (.not. am_hider .and. gs%s_item_seen(i))) then
+                                if (gs%item_seen(i, mi)) then
                                     itype = gs%items(i)%itype
                                     tip = trim(game_item_name(itype)) // ': ' // &
                                           trim(game_item_description(itype))
@@ -2211,11 +2233,16 @@ contains
     ! -----------------------------------------------------------------
     subroutine render_quit_modal()
         type(sdl_rect) :: ovr
+        integer :: ox, oy, ow, oh
+
+        ow = 500; oh = 140
+        ox = SCREEN_W/2 - ow/2
+        oy = SCREEN_H/2 - oh/2
 
         ! Darken background
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(0), uint8(0), uint8(0), uint8(180))
-        ovr = sdl_rect(150, 200, 500, 140)
+        ovr = sdl_rect(ox, oy, ow, oh)
         rc = sdl_render_fill_rect(main_renderer, ovr)
 
         ! Border
@@ -2224,11 +2251,11 @@ contains
         rc = sdl_render_draw_rect(main_renderer, ovr)
 
         call draw_text_centered('Quit the game?', big_font, COL_YELLOW, &
-                                SCREEN_W/2, 215)
-        call draw_text_centered('The map will be revealed to both players', &
-                                sml_font, COL_GRAY, SCREEN_W/2, 260)
+                                SCREEN_W/2, oy + 15)
+        call draw_text_centered('The map will be revealed to all players', &
+                                sml_font, COL_GRAY, SCREEN_W/2, oy + 60)
         call draw_text_centered('[Y] Confirm   /   Any other key = Cancel', &
-                                sml_font, COL_WHITE, SCREEN_W/2, 300)
+                                sml_font, COL_WHITE, SCREEN_W/2, oy + 100)
     end subroutine
 
     ! -----------------------------------------------------------------
@@ -2313,6 +2340,15 @@ contains
         call net_send_msg(game_fd, MSG_CONFIG_CHANGE, buf, nbytes, st)
     end subroutine
 
+    subroutine send_team_change(slot, new_team)
+        integer, intent(in) :: slot, new_team
+        integer(c_int8_t), target :: buf(2)
+        integer(c_int) :: st
+        buf(1) = int(slot, c_int8_t)
+        buf(2) = int(new_team, c_int8_t)
+        call net_send_msg(game_fd, MSG_TEAM_CHANGE, buf, 2, st)
+    end subroutine
+
     subroutine send_start_game_request()
         integer(c_int8_t), target :: dummy(1)
         integer(c_int) :: st
@@ -2339,7 +2375,8 @@ contains
 
             case (MSG_ROOM_UPDATE)
                 call room_parse_update_payload(payload, payload_len, &
-                    room_cfg, room_player_names, room_player_is_host, room_num_players)
+                    room_cfg, room_player_names, room_player_is_host, &
+                    room_player_teams, room_num_players)
                 print *, '[ROOM] update: ', room_num_players, ' players, host=', room_i_am_host
                 ! If we're on the lobby page but got a room update, switch to room page
                 if (current_page == PAGE_LOBBY) then
@@ -2353,6 +2390,9 @@ contains
                 am_host = .false.   ! on dedicated server we're never HOST in the old sense
                 game_ready = .false.
                 gs%initialized = .false.
+                game_ended = .false.
+                game_ended_by_quit = .false.
+                show_quit_modal = .false.
                 recv_init_pos = 0
                 ! Transfer any leftover lobby recv data to init buffer
                 if (lobby_recv_pos > 0) then
@@ -2430,7 +2470,7 @@ contains
             ry = 250 + (i-1) * 45
             ! "Join" button for this room
             if (mx>=620+ox .and. mx<=700+ox .and. my>=ry+5 .and. my<=ry+35) then
-                if (.not. lobby_room_ingame(i) .and. lobby_room_nplayers(i) < 2) then
+                if (.not. lobby_room_ingame(i) .and. lobby_room_nplayers(i) < MAX_ROOM_PLAYERS) then
                     call send_join_room(lobby_room_ids(i), trim(lobby_player_name))
                     room_i_am_host = .false.
                 end if
@@ -2546,12 +2586,12 @@ contains
                     call draw_text_at(sml_font, trim(lobby_room_names(i)), &
                                       COL_WHITE, 100 + ox, ry + 10)
                     ! Player count
-                    write(info, '(I0,A)') lobby_room_nplayers(i), '/2'
+                    write(info, '(I0,A,I0)') lobby_room_nplayers(i), '/', MAX_ROOM_PLAYERS
                     call draw_text_at(sml_font, trim(info), COL_YELLOW, 470 + ox, ry + 10)
                     ! Status
                     if (lobby_room_ingame(i)) then
                         call draw_text_at(sml_font, 'In game', COL_RED, 540 + ox, ry + 10)
-                    else if (lobby_room_nplayers(i) >= 2) then
+                    else if (lobby_room_nplayers(i) >= MAX_ROOM_PLAYERS) then
                         call draw_text_at(sml_font, 'Full', COL_ORANGE, 540 + ox, ry + 10)
                     else
                         call draw_text_at(sml_font, 'Open', COL_GREEN, 540 + ox, ry + 10)
@@ -2582,10 +2622,10 @@ contains
         integer, intent(in) :: mx, my
         integer :: total_items
 
-        ! "Leave" button
-        if (mx>=SCREEN_W/2-100 .and. mx<=SCREEN_W/2+100 .and. my>=540 .and. my<=580) then
+        ! "Leave" button (at bottom)
+        if (mx>=SCREEN_W/2-100 .and. mx<=SCREEN_W/2+100 .and. my>=SCREEN_H-45 .and. my<=SCREEN_H-5) then
             call send_leave_room()
-            room_my_id = 0
+            room_id = 0
             if (hosting_with_server) then
                 call go_back_to_menu()
             else
@@ -2597,7 +2637,8 @@ contains
 
         ! "Start game" button (host only)
         if (room_i_am_host .and. room_num_players >= 2) then
-            if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. my>=480 .and. my<=530) then
+            if (mx>=SCREEN_W/2-150 .and. mx<=SCREEN_W/2+150 .and. &
+                my>=SCREEN_H-100 .and. my<=SCREEN_H-50) then
                 call send_start_game_request()
                 return
             end if
@@ -2606,65 +2647,105 @@ contains
         ! Config editing (host only) - similar layout to host page
         if (.not. room_i_am_host) return
 
+        ! ===== Player arrow buttons to swap team (check first) =====
+        if (room_teams_base_y > 0 .and. my >= room_teams_base_y - 5) then
+            block
+                integer :: esc_n, lab_n, pi, row_y
+                esc_n = 0
+                lab_n = 0
+                do pi = 1, room_num_players
+                    if (room_player_teams(pi) == TEAM_ESCAPE) then
+                        esc_n = esc_n + 1
+                        row_y = room_teams_base_y + (esc_n - 1) * 28
+                        if (mx >= 640 .and. mx <= 670 .and. &
+                            my >= row_y - 2 .and. my <= row_y + 23) then
+                            call send_team_change(pi, TEAM_LABYRINTH)
+                            return
+                        end if
+                    else
+                        lab_n = lab_n + 1
+                        row_y = room_teams_base_y + (lab_n - 1) * 28
+                        if (mx >= 700 .and. mx <= 730 .and. &
+                            my >= row_y - 2 .and. my <= row_y + 23) then
+                            call send_team_change(pi, TEAM_ESCAPE)
+                            return
+                        end if
+                    end if
+                end do
+            end block
+        end if
+
         total_items = sum(room_cfg%item_counts)
 
         ! ===== LEFT COLUMN (x_base=20): minus at 240, plus at 315 =====
         ! Row: Width (y=184)
-        if (my >= 171 .and. my <= 197) then
+        if (mx <= 400 .and. my >= 171 .and. my <= 197) then
             if (mx >= 240 .and. mx <= 262) room_cfg%maze_w = max(7, room_cfg%maze_w - 2)
             if (mx >= 315 .and. mx <= 337) room_cfg%maze_w = min(MAZE_MAX_W, room_cfg%maze_w + 2)
             call send_config_change(); return
         end if
         ! Row: Height (y=210)
-        if (my >= 197 .and. my <= 223) then
+        if (mx <= 400 .and. my >= 197 .and. my <= 223) then
             if (mx >= 240 .and. mx <= 262) room_cfg%maze_h = max(7, room_cfg%maze_h - 2)
             if (mx >= 315 .and. mx <= 337) room_cfg%maze_h = min(MAZE_MAX_H, room_cfg%maze_h + 2)
             call send_config_change(); return
         end if
         ! Row: Min dist (y=236)
-        if (my >= 223 .and. my <= 249) then
+        if (mx <= 400 .and. my >= 223 .and. my <= 249) then
             if (mx >= 240 .and. mx <= 262) room_cfg%min_dist = max(1, room_cfg%min_dist - 1)
             if (mx >= 315 .and. mx <= 337) room_cfg%min_dist = min(99, room_cfg%min_dist + 1)
             call send_config_change(); return
         end if
         ! Row: Branch % (y=262)
-        if (my >= 249 .and. my <= 275) then
+        if (mx <= 400 .and. my >= 249 .and. my <= 275) then
             if (mx >= 240 .and. mx <= 262) room_cfg%branch_pct = max(0, room_cfg%branch_pct - 1)
             if (mx >= 315 .and. mx <= 337) room_cfg%branch_pct = min(50, room_cfg%branch_pct + 1)
             call send_config_change(); return
         end if
+        ! Row: Num keys (y=288)
+        if (mx <= 400 .and. my >= 275 .and. my <= 301) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%num_keys = max(1, room_cfg%num_keys - 1)
+            if (mx >= 315 .and. mx <= 337) room_cfg%num_keys = min(MAX_KEYS, room_cfg%num_keys + 1)
+            call send_config_change(); return
+        end if
+        ! Row: Turn timer (y=314)
+        if (mx <= 400 .and. my >= 301 .and. my <= 327) then
+            if (mx >= 240 .and. mx <= 262) room_cfg%turn_timer = max(0, room_cfg%turn_timer - 5)
+            if (mx >= 315 .and. mx <= 337) room_cfg%turn_timer = min(120, room_cfg%turn_timer + 5)
+            call send_config_change(); return
+        end if
 
-        ! -- Bonuses block rows (shifted up since Host hides removed) --
-        ! Row: Nb Dash (y=332)
-        if (my >= 319 .and. my <= 345) then
+        ! -- Bonuses block --
+        ! Row: Nb Dash (y=386)
+        if (mx <= 400 .and. my >= 373 .and. my <= 399) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_DASH) = max(0, room_cfg%item_counts(ITEM_DASH) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_DASH) = room_cfg%item_counts(ITEM_DASH) + 1
             call send_config_change(); return
         end if
-        ! Row: Nb Vision (y=358)
-        if (my >= 345 .and. my <= 371) then
+        ! Row: Nb Vision (y=412)
+        if (mx <= 400 .and. my >= 399 .and. my <= 425) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_VISION) = max(0, room_cfg%item_counts(ITEM_VISION) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_VISION) = room_cfg%item_counts(ITEM_VISION) + 1
             call send_config_change(); return
         end if
-        ! Row: Nb Light (y=384)
-        if (my >= 371 .and. my <= 397) then
+        ! Row: Nb Light (y=438)
+        if (mx <= 400 .and. my >= 425 .and. my <= 451) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_ILLUMINATE) = max(0, room_cfg%item_counts(ITEM_ILLUMINATE) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_ILLUMINATE) = room_cfg%item_counts(ITEM_ILLUMINATE) + 1
             call send_config_change(); return
         end if
-        ! Row: Nb Speed (y=410)
-        if (my >= 397 .and. my <= 423) then
+        ! Row: Nb Speed (y=464)
+        if (mx <= 400 .and. my >= 451 .and. my <= 477) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_SPEED) = max(0, room_cfg%item_counts(ITEM_SPEED) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_SPEED) = room_cfg%item_counts(ITEM_SPEED) + 1
             call send_config_change(); return
         end if
-        ! Row: Nb Pickaxe (y=436)
-        if (my >= 423 .and. my <= 449) then
+        ! Row: Nb Pickaxe (y=490)
+        if (mx <= 400 .and. my >= 477 .and. my <= 503) then
             if (mx >= 240 .and. mx <= 262) room_cfg%item_counts(ITEM_WALL_BREAK) = max(0, room_cfg%item_counts(ITEM_WALL_BREAK) - 1)
             if (mx >= 315 .and. mx <= 337 .and. total_items < MAX_GROUND_ITEMS) &
                 room_cfg%item_counts(ITEM_WALL_BREAK) = room_cfg%item_counts(ITEM_WALL_BREAK) + 1
@@ -2713,19 +2794,6 @@ contains
                 call send_config_change(); return
             end if
         end if
-
-        ! ===== Player role toggle (right column, y starts at 436) =====
-        ! Role buttons at x=670..750, each row is 28px apart
-        if (mx >= 670 .and. mx <= 750) then
-            if (room_num_players >= 1 .and. my >= 433 .and. my <= 455) then
-                room_cfg%host_hides = .not. room_cfg%host_hides
-                call send_config_change(); return
-            end if
-            if (room_num_players >= 2 .and. my >= 461 .and. my <= 483) then
-                room_cfg%host_hides = .not. room_cfg%host_hides
-                call send_config_change(); return
-            end if
-        end if
     end subroutine
 
     ! --- Room keyboard ---
@@ -2733,7 +2801,7 @@ contains
         integer(c_int32_t), intent(in) :: sym
         if (sym == SDLK_ESCAPE) then
             call send_leave_room()
-            room_my_id = 0
+            room_id = 0
             if (hosting_with_server) then
                 call go_back_to_menu()
             else
@@ -2761,6 +2829,8 @@ contains
         call draw_param_row_at(20, ly, 'Height',    room_cfg%maze_h);  ly = ly + 26
         call draw_param_row_at(20, ly, 'Min dist.', room_cfg%min_dist); ly = ly + 26
         call draw_param_row_at(20, ly, 'Branch %',  room_cfg%branch_pct); ly = ly + 26
+        call draw_param_row_at(20, ly, 'Num keys',  room_cfg%num_keys); ly = ly + 26
+        call draw_param_row_at(20, ly, 'Turn timer', room_cfg%turn_timer); ly = ly + 26
 
         ly = ly + 8
         call draw_text_at(sml_font, '--- Bonuses ---', COL_GRAY, 20, ly)
@@ -2776,7 +2846,7 @@ contains
         call draw_param_row_at(20, ly, 'Nb Pickaxe', room_cfg%item_counts(ITEM_WALL_BREAK)); ly = ly + 26
 
         ! ===== RIGHT COLUMN: Hider/Seeker config =====
-        call draw_text_at(sml_font, '--- Hider ---', COL_GRAY, 410, 140)
+        call draw_text_at(sml_font, '--- Escape ---', COL_GRAY, 410, 140)
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(80), uint8(80), uint8(100), uint8(255))
         rc = sdl_render_draw_line(main_renderer, 410, 160, 770, 160)
@@ -2787,7 +2857,7 @@ contains
         call draw_toggle_row_at(410, ry, 'Maze revealed', room_cfg%reveal_h); ry = ry + 26
 
         ry = ry + 8
-        call draw_text_at(sml_font, '--- Seeker ---', COL_GRAY, 410, ry)
+        call draw_text_at(sml_font, '--- Labyrinth ---', COL_GRAY, 410, ry)
         ry = ry + 20
         rc = sdl_set_render_draw_color(main_renderer, &
                 uint8(80), uint8(80), uint8(100), uint8(255))
@@ -2797,63 +2867,71 @@ contains
         call draw_param_row_at(410, ry, 'Vision', room_cfg%vision_s); ry = ry + 26
         call draw_toggle_row_at(410, ry, 'Maze revealed', room_cfg%reveal_s); ry = ry + 26
 
-        ! ===== Players list =====
+        ! ===== Player Team Columns =====
         ry = ry + 20
-        call draw_text_at(sml_font, '--- Players ---', COL_GRAY, 410, ry)
+        call draw_text_at(sml_font, '--- Escape Team ---', COL_RED, 410, ry)
+        call draw_text_at(sml_font, '--- Labyrinth Team ---', COL_CYAN, 700, ry)
         ry = ry + 20
         rc = sdl_set_render_draw_color(main_renderer, &
-                uint8(80), uint8(80), uint8(100), uint8(255))
-        rc = sdl_render_draw_line(main_renderer, 410, ry, 770, ry)
-        ry = ry + 10
-        do i = 1, room_num_players
-            ! Player name
-            if (room_player_is_host(i)) then
-                write(info, '(A,A,A)') trim(room_player_names(i)), ' ', '(host)'
-                call draw_text_at(sml_font, trim(info), COL_YELLOW, 420, ry)
-            else
-                call draw_text_at(sml_font, trim(room_player_names(i)), COL_WHITE, 420, ry)
-            end if
-            ! Role button
-            if (i == 1) then
-                if (room_cfg%host_hides) then
-                    call draw_button(670, ry - 3, 80, 22, 'Hider', COL_GREEN)
+                uint8(180), uint8(50), uint8(50), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 410, ry, 680, ry)
+        rc = sdl_set_render_draw_color(main_renderer, &
+                uint8(50), uint8(100), uint8(180), uint8(255))
+        rc = sdl_render_draw_line(main_renderer, 700, ry, 1000, ry)
+
+        room_teams_base_y = ry + 14
+        block
+            integer :: esc_y, lab_y
+            esc_y = room_teams_base_y
+            lab_y = room_teams_base_y
+            do i = 1, room_num_players
+                if (room_player_teams(i) == TEAM_ESCAPE) then
+                    if (room_player_is_host(i)) then
+                        write(info, '(A,A)') trim(room_player_names(i)), ' (host)'
+                        call draw_text_at(sml_font, trim(info), COL_YELLOW, 420, esc_y)
+                    else
+                        call draw_text_at(sml_font, trim(room_player_names(i)), COL_WHITE, 420, esc_y)
+                    end if
+                    if (room_i_am_host) &
+                        call draw_button(640, esc_y + 1, 30, 22, '>>', COL_YELLOW)
+                    esc_y = esc_y + 28
                 else
-                    call draw_button(670, ry - 3, 80, 22, 'Seeker', COL_CYAN)
+                    if (room_i_am_host) &
+                        call draw_button(700, lab_y + 1, 30, 22, '<<', COL_YELLOW)
+                    if (room_player_is_host(i)) then
+                        write(info, '(A,A)') trim(room_player_names(i)), ' (host)'
+                        call draw_text_at(sml_font, trim(info), COL_YELLOW, 735, lab_y)
+                    else
+                        call draw_text_at(sml_font, trim(room_player_names(i)), COL_WHITE, 735, lab_y)
+                    end if
+                    lab_y = lab_y + 28
                 end if
-            else
-                if (room_cfg%host_hides) then
-                    call draw_button(670, ry - 3, 80, 22, 'Seeker', COL_CYAN)
-                else
-                    call draw_button(670, ry - 3, 80, 22, 'Hider', COL_GREEN)
-                end if
-            end if
-            ry = ry + 28
-        end do
+            end do
+        end block
 
         if (.not. room_i_am_host) then
             call draw_text_centered('Waiting for host to start...', sml_font, &
                                     COL_DIM, SCREEN_W/2, 50)
         end if
 
-        ! Host-only info
         if (room_i_am_host .and. room_num_players < 2) then
             call draw_text_centered('Waiting for another player...', sml_font, &
                                     COL_YELLOW, SCREEN_W/2, 50)
         end if
 
-        ! Show connection info when hosting
+        ! Connection info when hosting
         if (hosting_with_server) then
             write(info, '(A,A,A,I0)') 'IP: ', trim(local_ip), '  Port: ', DEFAULT_PORT
             call draw_text_centered(trim(info), sml_font, COL_GRAY, SCREEN_W/2, 75)
         end if
 
-        ! Start button (host only, 2 players)
+        ! Start button (host only, 2+ players) at bottom
         if (room_i_am_host .and. room_num_players >= 2) then
-            call draw_button(SCREEN_W/2 - 150, 480, 300, 50, 'Start game', COL_GREEN)
+            call draw_button(SCREEN_W/2 - 150, SCREEN_H - 100, 300, 50, 'Start game', COL_GREEN)
         end if
 
-        ! Leave button
-        call draw_button(SCREEN_W/2 - 100, 540, 200, 40, 'Leave', COL_RED)
+        ! Leave button at bottom
+        call draw_button(SCREEN_W/2 - 100, SCREEN_H - 45, 200, 40, 'Leave', COL_RED)
     end subroutine
 
     function int_to_str(n) result(s)

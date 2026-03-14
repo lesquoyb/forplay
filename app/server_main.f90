@@ -159,11 +159,16 @@ contains
         integer(c_int8_t) :: msg_type
         integer(c_int8_t) :: payload(1024)
         integer :: payload_len
-        logical :: got
+        logical :: got, closed
 
         call net_try_recv_msg(clients(ci)%fd, clients(ci)%recv_buf, RECV_BUF_SZ, &
-                              clients(ci)%recv_pos, msg_type, payload, 1024, payload_len, got)
+                              clients(ci)%recv_pos, msg_type, payload, 1024, payload_len, got, closed)
 
+        if (closed) then
+            write(stdout, '(A,I0,A)') 'Client ', ci, ' connection lost'
+            call disconnect_client(ci)
+            return
+        end if
         if (.not. got) return
 
         select case (msg_type)
@@ -177,12 +182,14 @@ contains
                 call handle_leave_room(ci)
             case (MSG_CONFIG_CHANGE)
                 call handle_config_change(ci, payload, payload_len)
+            case (MSG_TEAM_CHANGE)
+                call handle_team_change(ci, payload, payload_len)
             case (MSG_START_GAME)
                 call handle_start_game(ci)
             case default
-                ! Unknown message - disconnect
-                write(stdout, '(A,I0,A,I0)') 'Client ', ci, ' sent unknown msg type: ', int(msg_type)
-                call disconnect_client(ci)
+                ! Discard stale data (e.g. game-protocol bytes after transition)
+                write(stdout, '(A,I0,A,I0)') 'Client ', ci, ' stale data, msg type: ', int(msg_type)
+                clients(ci)%recv_pos = 0
         end select
     end subroutine
 
@@ -320,13 +327,39 @@ contains
     end subroutine
 
     ! ==================================================================
+    ! Handle MSG_TEAM_CHANGE: host changes a player's team
+    ! Payload: [player_slot (1-byte), new_team (1-byte)]
+    ! ==================================================================
+    subroutine handle_team_change(ci, payload, plen)
+        integer, intent(in) :: ci, plen
+        integer(c_int8_t), intent(in) :: payload(:)
+        integer :: ridx, slot, new_team
+
+        if (plen < 2) return
+        ridx = clients(ci)%room_idx
+        if (ridx < 1 .or. ridx > MAX_ROOMS) return
+        if (.not. rooms(ridx)%active) return
+        if (.not. is_room_host(ridx, clients(ci)%fd)) return
+
+        slot = int(payload(1))
+        new_team = int(payload(2))
+        if (slot < 1 .or. slot > rooms(ridx)%num_players) return
+        if (new_team /= TEAM_ESCAPE .and. new_team /= TEAM_LABYRINTH) return
+
+        rooms(ridx)%players(slot)%team = new_team
+        write(stdout, '(A,I0,A,I0,A,I0)') 'Room ', ridx, ': player ', slot, ' team -> ', new_team
+        call send_room_update(ridx)
+    end subroutine
+
+    ! ==================================================================
     ! Handle MSG_START_GAME: host starts the game
     ! ==================================================================
     subroutine handle_start_game(ci)
         integer, intent(in) :: ci
-        integer :: ridx
+        integer :: ridx, j, k
         integer(c_int) :: st
         integer(c_int8_t), target :: dummy(1)
+        integer :: player_teams(MAX_PLAYERS)
 
         ridx = clients(ci)%room_idx
         if (ridx < 1 .or. ridx > MAX_ROOMS) return
@@ -336,40 +369,37 @@ contains
 
         rooms(ridx)%in_game = .true.
 
-        ! Initialize game
-        call server_init_game(room_gs(ridx), rooms(ridx)%cfg)
+        ! Build player_teams from room
+        do j = 1, rooms(ridx)%num_players
+            player_teams(j) = rooms(ridx)%players(j)%team
+        end do
+
+        call server_init_game(room_gs(ridx), rooms(ridx)%cfg, &
+                              rooms(ridx)%num_players, player_teams)
 
         write(stdout, '(A,I0,A,I0,A,I0)') 'Room ', ridx, ': game started, maze ', &
             room_gs(ridx)%maze%w, 'x', room_gs(ridx)%maze%h
 
-        ! Send MSG_START_GAME to all room players (empty payload)
-        block
-            integer :: j
-            do j = 1, rooms(ridx)%num_players
-                call net_send_msg(rooms(ridx)%players(j)%fd, MSG_START_GAME, dummy, 0, st)
-            end do
-        end block
+        ! Send MSG_START_GAME to all room players
+        do j = 1, rooms(ridx)%num_players
+            call net_send_msg(rooms(ridx)%players(j)%fd, MSG_START_GAME, dummy, 0, st)
+        end do
 
-        ! Send game init to both players
-        ! Player 1 (host): receives .not. host_hides so am_hider = host_hides
-        call server_send_init_to_fd(rooms(ridx)%players(1)%fd, room_gs(ridx), &
-                                    .not. rooms(ridx)%cfg%host_hides, st)
-        call server_send_init_to_fd(rooms(ridx)%players(2)%fd, room_gs(ridx), &
-                                    rooms(ridx)%cfg%host_hides, st)
+        ! Send game init to each player with their index
+        do j = 1, rooms(ridx)%num_players
+            call server_send_init_to_fd(rooms(ridx)%players(j)%fd, room_gs(ridx), j, st)
+        end do
 
         ! Switch all room clients to game state
-        block
-            integer :: j, k
-            do j = 1, rooms(ridx)%num_players
-                do k = 1, MAX_CLIENTS
-                    if (clients(k)%active .and. clients(k)%fd == rooms(ridx)%players(j)%fd) then
-                        clients(k)%state = CLIENT_GAME
-                        clients(k)%recv_pos = 0  ! reset recv buffer for game protocol
-                        exit
-                    end if
-                end do
+        do j = 1, rooms(ridx)%num_players
+            do k = 1, MAX_CLIENTS
+                if (clients(k)%active .and. clients(k)%fd == rooms(ridx)%players(j)%fd) then
+                    clients(k)%state = CLIENT_GAME
+                    clients(k)%recv_pos = 0
+                    exit
+                end if
             end do
-        end block
+        end do
     end subroutine
 
     ! ==================================================================
@@ -377,61 +407,68 @@ contains
     ! ==================================================================
     subroutine process_game_client(ci)
         integer, intent(in) :: ci
-        integer :: atype, param, ridx, opp_fd
-        logical :: got, moved
-        integer :: role
+        integer :: atype, param, ridx, pidx, recv_pidx, j
+        logical :: got, moved, closed
         integer(c_int) :: st
+        integer :: player_teams(MAX_PLAYERS)
 
         ridx = clients(ci)%room_idx
         if (ridx < 1 .or. .not. rooms(ridx)%active) return
         if (.not. rooms(ridx)%in_game) return
 
-        call server_try_recv_action(clients(ci)%fd, atype, param, got)
+        call server_try_recv_action(clients(ci)%fd, recv_pidx, atype, param, got, closed)
+        if (closed) then
+            write(stdout, '(A,I0,A)') 'Client ', ci, ' connection lost (in game)'
+            call disconnect_client(ci)
+            return
+        end if
         if (.not. got) return
 
-        ! Find opponent fd and role
-        call find_opponent_and_role(ridx, clients(ci)%fd, opp_fd, role)
-        if (opp_fd < 0) return
+        ! Find this client's player index
+        pidx = find_player_index(ridx, clients(ci)%fd)
+        if (pidx < 1) return
 
-        ! Quit: notify opponent, end room game
+        ! Quit: notify all others, end room game
         if (atype == 8) then
-            write(stdout, '(A,I0,A,I0)') 'Room ', ridx, ': player quit, role=', role
-            call server_send_action(opp_fd, 8, 0)
+            write(stdout, '(A,I0,A,I0)') 'Room ', ridx, ': player quit, pidx=', pidx
+            call broadcast_action(ridx, clients(ci)%fd, 0, 8, 0)
             call end_room_game(ridx)
             return
         end if
 
-        ! Replay (host only): reinit game, send action 9 + init to both
+        ! Replay (host only): reinit game, send action 9 + init to all
         if (atype == 9) then
             if (.not. is_room_host(ridx, clients(ci)%fd)) return
             write(stdout, '(A,I0,A)') 'Room ', ridx, ': host replaying'
-            call server_init_game(room_gs(ridx), rooms(ridx)%cfg)
-            call server_send_action(rooms(ridx)%players(1)%fd, 9, 0)
-            call server_send_action(rooms(ridx)%players(2)%fd, 9, 0)
-            call server_send_init_to_fd(rooms(ridx)%players(1)%fd, &
-                                        room_gs(ridx), &
-                                        .not. rooms(ridx)%cfg%host_hides, st)
-            call server_send_init_to_fd(rooms(ridx)%players(2)%fd, &
-                                        room_gs(ridx), &
-                                        rooms(ridx)%cfg%host_hides, st)
+            do j = 1, rooms(ridx)%num_players
+                player_teams(j) = rooms(ridx)%players(j)%team
+            end do
+            call server_init_game(room_gs(ridx), rooms(ridx)%cfg, &
+                                  rooms(ridx)%num_players, player_teams)
+            do j = 1, rooms(ridx)%num_players
+                call server_send_action(rooms(ridx)%players(j)%fd, 0, 9, 0)
+                call server_send_init_to_fd(rooms(ridx)%players(j)%fd, &
+                                            room_gs(ridx), j, st)
+            end do
             return
         end if
 
-        ! Back to room (host only): send action 10 to both, end game, send room update
+        ! Back to room (host only): send action 10 to all, end game
         if (atype == 10) then
             if (.not. is_room_host(ridx, clients(ci)%fd)) return
             write(stdout, '(A,I0,A)') 'Room ', ridx, ': back to room'
-            call server_send_action(rooms(ridx)%players(1)%fd, 10, 0)
-            call server_send_action(rooms(ridx)%players(2)%fd, 10, 0)
+            do j = 1, rooms(ridx)%num_players
+                call server_send_action(rooms(ridx)%players(j)%fd, 0, 10, 0)
+            end do
             call end_room_game(ridx)
             call send_room_update(ridx)
             return
         end if
 
-        ! Leave room from game (non-host): notify opponent, end game, remove from room
+        ! Leave room from game (non-host): notify all others, end game, remove
         if (atype == 11) then
             write(stdout, '(A,I0,A,I0)') 'Room ', ridx, ': non-host leaving, client=', ci
-            call server_send_action(opp_fd, 8, 0)
+            call broadcast_action(ridx, clients(ci)%fd, 0, 8, 0)
             call end_room_game(ridx)
             call room_leave(rooms, ridx, clients(ci)%fd)
             clients(ci)%room_idx = 0
@@ -443,24 +480,24 @@ contains
         ! Don't process normal moves after game over
         if (room_gs(ridx)%game_over) return
 
-        ! Normal action: relay and apply
-        call server_send_action(opp_fd, atype, param)
+        ! Normal action: broadcast to all others and apply
+        call broadcast_action(ridx, clients(ci)%fd, pidx, atype, param)
 
         if (atype == 0) then
-            moved = game_do_move(room_gs(ridx), role, param)
+            moved = game_do_move(room_gs(ridx), pidx, param)
         else if (atype == 7) then
             call game_do_pass(room_gs(ridx))
         else
-            call game_do_use_item(room_gs(ridx), role, atype, param)
+            call game_do_use_item(room_gs(ridx), pidx, atype, param)
         end if
 
         call game_end_turn(room_gs(ridx))
 
         if (room_gs(ridx)%game_over) then
-            if (room_gs(ridx)%seeker_won) then
-                write(stdout, '(A,I0,A)') 'Room ', ridx, ': seeker wins!'
+            if (room_gs(ridx)%seekers_won) then
+                write(stdout, '(A,I0,A)') 'Room ', ridx, ': labyrinth team wins!'
             else
-                write(stdout, '(A,I0,A)') 'Room ', ridx, ': hider wins!'
+                write(stdout, '(A,I0,A)') 'Room ', ridx, ': escape team wins!'
             end if
         end if
     end subroutine
@@ -479,6 +516,7 @@ contains
                 if (clients(k)%active .and. clients(k)%fd == rooms(ridx)%players(j)%fd) then
                     clients(k)%state = CLIENT_ROOM
                     clients(k)%recv_pos = 0
+                    call net_drain_socket(clients(k)%fd)
                     exit
                 end if
             end do
@@ -486,26 +524,35 @@ contains
     end subroutine
 
     ! ==================================================================
-    ! Find the opponent fd and the player's role in a room
+    ! Find player index by fd in a room (1-based, 0 if not found)
     ! ==================================================================
-    subroutine find_opponent_and_role(ridx, my_fd, opp_fd, my_role)
+    function find_player_index(ridx, fd) result(pidx)
         integer, intent(in) :: ridx
-        integer(c_int), intent(in) :: my_fd
-        integer(c_int), intent(out) :: opp_fd
-        integer, intent(out) :: my_role
+        integer(c_int), intent(in) :: fd
+        integer :: pidx, j
 
-        opp_fd = -1
-        my_role = ROLE_HIDER
+        pidx = 0
+        do j = 1, rooms(ridx)%num_players
+            if (rooms(ridx)%players(j)%fd == fd) then
+                pidx = j
+                return
+            end if
+        end do
+    end function
 
-        if (rooms(ridx)%num_players < 2) return
+    ! ==================================================================
+    ! Broadcast action to all room players except sender
+    ! ==================================================================
+    subroutine broadcast_action(ridx, sender_fd, pidx, atype, param)
+        integer, intent(in) :: ridx, pidx, atype, param
+        integer(c_int), intent(in) :: sender_fd
+        integer :: j
 
-        if (rooms(ridx)%players(1)%fd == my_fd) then
-            my_role = ROLE_HIDER   ! player 1 = hider
-            opp_fd = rooms(ridx)%players(2)%fd
-        else
-            my_role = ROLE_SEEKER  ! player 2 = seeker
-            opp_fd = rooms(ridx)%players(1)%fd
-        end if
+        do j = 1, rooms(ridx)%num_players
+            if (rooms(ridx)%players(j)%fd /= sender_fd) then
+                call server_send_action(rooms(ridx)%players(j)%fd, pidx, atype, param)
+            end if
+        end do
     end subroutine
 
     ! ==================================================================
@@ -553,15 +600,10 @@ contains
 
         ridx = clients(ci)%room_idx
         if (ridx > 0 .and. rooms(ridx)%active) then
-            ! If in game, notify opponent
             if (rooms(ridx)%in_game .and. clients(ci)%state == CLIENT_GAME) then
-                block
-                    integer(c_int) :: opp_fd
-                    integer :: role
-                    call find_opponent_and_role(ridx, clients(ci)%fd, opp_fd, role)
-                    if (opp_fd >= 0) call server_send_action(opp_fd, 8, 0)
-                    call end_room_game(ridx)
-                end block
+                ! Notify all other players this client quit
+                call broadcast_action(ridx, clients(ci)%fd, 0, 8, 0)
+                call end_room_game(ridx)
             end if
             call room_leave(rooms, ridx, clients(ci)%fd)
             if (rooms(ridx)%active) call send_room_update(ridx)

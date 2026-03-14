@@ -48,9 +48,9 @@ module server_mod
 
     ! --- Limits ---
     integer, parameter :: MAX_ROOMS        = 10
-    integer, parameter :: MAX_ROOM_PLAYERS = 2
+    integer, parameter :: MAX_ROOM_PLAYERS = 6
     integer, parameter :: MAX_ROOM_NAME    = 32
-    integer, parameter :: SERVER_CONFIG_BYTES = 16  ! serialised config size
+    integer, parameter :: SERVER_CONFIG_BYTES = 17  ! serialised config size
 
     ! --- Game configuration (set by host before starting) ---
     type :: server_config
@@ -64,7 +64,8 @@ module server_mod
         integer :: vision_s    = 2
         logical :: reveal_h    = .false.
         logical :: reveal_s    = .true.
-        logical :: host_hides  = .true.
+        integer :: num_keys    = 1
+        integer :: turn_timer  = 0    ! seconds, 0=disabled
         integer :: branch_pct  = 5   ! 0-100 (percent)
     end type
 
@@ -74,6 +75,7 @@ module server_mod
         character(len=32) :: name = ' '
         character(len=64) :: ip   = ' '
         logical :: is_host = .false.
+        integer :: team = TEAM_ESCAPE
     end type
 
     ! --- Room ---
@@ -88,7 +90,7 @@ module server_mod
     end type
 
     ! --- Embedded server limits ---
-    integer, parameter :: EMB_MAX_CLIENTS  = 4
+    integer, parameter :: EMB_MAX_CLIENTS  = 8
     integer, parameter :: EMB_RECV_BUF_SZ  = 4096
     integer, parameter :: EMB_CLIENT_LOBBY = 0
     integer, parameter :: EMB_CLIENT_ROOM  = 1
@@ -132,7 +134,8 @@ contains
         cfg%vision_s    = 2
         cfg%reveal_h    = .false.
         cfg%reveal_s    = .true.
-        cfg%host_hides  = .true.
+        cfg%num_keys    = 1
+        cfg%turn_timer  = 0
         cfg%branch_pct  = 5
     end subroutine
 
@@ -178,45 +181,55 @@ contains
     ! Initialize a game using the given config.
     ! Ensures maze dims are odd for proper generation.
     ! ==================================================================
-    subroutine server_init_game(gs, cfg)
+    subroutine server_init_game(gs, cfg, num_players, player_teams)
         type(game_state), intent(out) :: gs
         type(server_config), intent(inout) :: cfg
+        integer, intent(in) :: num_players
+        integer, intent(in) :: player_teams(MAX_PLAYERS)
 
         ! Ensure maze dims are odd
         if (mod(cfg%maze_w, 2) == 0) cfg%maze_w = cfg%maze_w + 1
         if (mod(cfg%maze_h, 2) == 0) cfg%maze_h = cfg%maze_h + 1
 
-        call game_init(gs, cfg%maze_w, cfg%maze_h, cfg%item_counts, cfg%min_dist, &
+        call game_init(gs, cfg%maze_w, cfg%maze_h, num_players, player_teams, &
+                       cfg%num_keys, cfg%item_counts, cfg%min_dist, &
                        cfg%speed_h, cfg%speed_s, cfg%vision_h, cfg%vision_s, &
                        cfg%reveal_h, cfg%reveal_s, real(cfg%branch_pct) / 100.0)
     end subroutine
 
     ! ==================================================================
     ! Serialize the game state into a byte buffer (init packet).
-    ! host_hides: .true. if the host plays as hider (determines
-    !             what role the *receiver* gets).
+    ! player_index: which player index (1..N) the receiver is.
     ! nbytes: actual number of bytes written.
     ! ==================================================================
-    subroutine server_build_init_packet(gs, host_hides, buf, nbytes)
+    subroutine server_build_init_packet(gs, player_index, buf, nbytes)
         type(game_state), intent(in) :: gs
-        logical, intent(in) :: host_hides
+        integer, intent(in) :: player_index
         integer(c_int8_t), intent(out) :: buf(:)
         integer, intent(out) :: nbytes
 
         integer :: k, ix, iy, i
 
         k = 0
-        ! Header: 10 bytes
+        ! Header: maze_w, maze_h, num_items, num_players, num_keys
         k = k+1; buf(k) = int(gs%maze%w, c_int8_t)
         k = k+1; buf(k) = int(gs%maze%h, c_int8_t)
         k = k+1; buf(k) = int(gs%num_items, c_int8_t)
-        k = k+1; buf(k) = int(gs%hider%speed, c_int8_t)
-        k = k+1; buf(k) = int(gs%seeker%speed, c_int8_t)
-        k = k+1; buf(k) = int(gs%hider%vision_radius, c_int8_t)
-        k = k+1; buf(k) = int(gs%seeker%vision_radius, c_int8_t)
-        if (gs%h_reveal) then; buf(k+1) = 1_c_int8_t; else; buf(k+1) = 0_c_int8_t; end if; k = k+1
-        if (gs%s_reveal) then; buf(k+1) = 1_c_int8_t; else; buf(k+1) = 0_c_int8_t; end if; k = k+1
-        if (host_hides) then; buf(k+1) = 1_c_int8_t; else; buf(k+1) = 0_c_int8_t; end if; k = k+1
+        k = k+1; buf(k) = int(gs%num_players, c_int8_t)
+        k = k+1; buf(k) = int(gs%num_keys, c_int8_t)
+
+        ! Per-player stats: team, speed, vision, reveal
+        do i = 1, gs%num_players
+            k = k+1; buf(k) = int(gs%players(i)%team, c_int8_t)
+            k = k+1; buf(k) = int(gs%players(i)%speed, c_int8_t)
+            k = k+1; buf(k) = int(gs%players(i)%vision_radius, c_int8_t)
+            k = k+1
+            if (gs%players(i)%reveal) then; buf(k) = 1_c_int8_t
+            else; buf(k) = 0_c_int8_t; end if
+        end do
+
+        ! My player index
+        k = k+1; buf(k) = int(player_index, c_int8_t)
 
         ! Maze cells (row-major)
         do iy = 1, gs%maze%h
@@ -232,15 +245,17 @@ contains
             k = k+1; buf(k) = int(gs%items(i)%itype, c_int8_t)
         end do
 
-        ! Player positions: hider_x, hider_y, seeker_x, seeker_y
-        k = k+1; buf(k) = int(gs%hider%x, c_int8_t)
-        k = k+1; buf(k) = int(gs%hider%y, c_int8_t)
-        k = k+1; buf(k) = int(gs%seeker%x, c_int8_t)
-        k = k+1; buf(k) = int(gs%seeker%y, c_int8_t)
+        ! Player positions: x, y per player
+        do i = 1, gs%num_players
+            k = k+1; buf(k) = int(gs%players(i)%x, c_int8_t)
+            k = k+1; buf(k) = int(gs%players(i)%y, c_int8_t)
+        end do
 
-        ! Key position
-        k = k+1; buf(k) = int(gs%key_x, c_int8_t)
-        k = k+1; buf(k) = int(gs%key_y, c_int8_t)
+        ! Key positions
+        do i = 1, gs%num_keys
+            k = k+1; buf(k) = int(gs%key_x(i), c_int8_t)
+            k = k+1; buf(k) = int(gs%key_y(i), c_int8_t)
+        end do
 
         nbytes = k
     end subroutine
@@ -248,59 +263,70 @@ contains
     ! ==================================================================
     ! Send the init packet to a specific socket fd.
     ! ==================================================================
-    subroutine server_send_init_to_fd(fd, gs, host_hides, status)
+    subroutine server_send_init_to_fd(fd, gs, player_index, status)
         integer(c_int), intent(in) :: fd
         type(game_state), intent(in) :: gs
-        logical, intent(in) :: host_hides
+        integer, intent(in) :: player_index
         integer(c_int), intent(out) :: status
 
-        integer(c_int8_t), target :: buf(2048)
+        integer(c_int8_t), target :: buf(4096)
         integer :: nbytes
 
-        call server_build_init_packet(gs, host_hides, buf, nbytes)
+        call server_build_init_packet(gs, player_index, buf, nbytes)
         call net_send_bytes(fd, buf, int(nbytes, c_int), status)
     end subroutine
 
     ! ==================================================================
     ! Parse a received init packet into a game_state.
-    ! Returns am_hider: .true. if the receiver plays as hider.
-    ! recv_buf must contain at least 'needed' bytes.
+    ! Returns player_index: the receiver's 1-based player index.
     ! Returns needed=0 on success, >0 if more bytes needed.
     ! ==================================================================
-    subroutine server_parse_init_packet(recv_buf, buflen, gs, am_hider, needed)
+    subroutine server_parse_init_packet(recv_buf, buflen, gs, player_index, needed)
         integer(c_int8_t), intent(in) :: recv_buf(:)
         integer, intent(in) :: buflen
         type(game_state), intent(out) :: gs
-        logical, intent(out) :: am_hider
+        integer, intent(out) :: player_index
         integer, intent(out) :: needed
 
-        integer :: k, mw, mh, ni, ix, iy, i
-        integer :: sp_h, sp_s, vis_h, vis_s
-        logical :: rev_h, rev_s, host_hides
+        integer :: k, mw, mh, ni, np, nk, ix, iy, i
 
         needed = 0
-
-        if (buflen < 10) then
-            needed = 10
+        if (buflen < 5) then
+            needed = 5
             return
         end if
 
-        mw   = int(recv_buf(1))
-        mh   = int(recv_buf(2))
-        ni   = int(recv_buf(3))
-        sp_h = int(recv_buf(4))
-        sp_s = int(recv_buf(5))
-        vis_h = int(recv_buf(6))
-        vis_s = int(recv_buf(7))
-        rev_h = (recv_buf(8) /= 0)
-        rev_s = (recv_buf(9) /= 0)
-        host_hides = (recv_buf(10) /= 0)
+        mw = int(recv_buf(1))
+        mh = int(recv_buf(2))
+        ni = int(recv_buf(3))
+        np = int(recv_buf(4))
+        nk = int(recv_buf(5))
 
-        needed = 10 + mw*mh + ni*3 + 4 + 2
+        ! Total: header(5) + per-player(np*4) + my_idx(1) + maze(mw*mh)
+        !        + items(ni*3) + positions(np*2) + keys(nk*2)
+        needed = 5 + np*4 + 1 + mw*mh + ni*3 + np*2 + nk*2
         if (buflen < needed) return
 
+        ! Parse per-player stats
+        k = 5
+        gs%num_players = np
+        do i = 1, np
+            k = k+1; gs%players(i)%team          = int(recv_buf(k))
+            k = k+1; gs%players(i)%speed         = int(recv_buf(k))
+            k = k+1; gs%players(i)%vision_radius = int(recv_buf(k))
+            k = k+1; gs%players(i)%reveal        = (recv_buf(k) /= 0)
+            gs%players(i)%actions_left = gs%players(i)%speed
+            gs%players(i)%num_items    = 0
+            gs%players(i)%inventory    = ITEM_NONE
+            gs%players(i)%captured     = .false.
+            gs%players(i)%illuminate   = .false.
+            gs%players(i)%class_id     = 0
+        end do
+
+        ! My player index
+        k = k+1; player_index = int(recv_buf(k))
+
         ! Parse maze
-        k = 10
         gs%maze%w = mw
         gs%maze%h = mh
         gs%maze%cells = 0
@@ -313,117 +339,111 @@ contains
         ! Parse ground items
         gs%num_items = ni
         do i = 1, ni
-            k = k+1; gs%items(i)%x = int(recv_buf(k))
-            k = k+1; gs%items(i)%y = int(recv_buf(k))
+            k = k+1; gs%items(i)%x     = int(recv_buf(k))
+            k = k+1; gs%items(i)%y     = int(recv_buf(k))
             k = k+1; gs%items(i)%itype = int(recv_buf(k))
             gs%items(i)%active = .true.
         end do
 
         ! Parse player positions
-        k = k+1; gs%hider%x  = int(recv_buf(k))
-        k = k+1; gs%hider%y  = int(recv_buf(k))
-        k = k+1; gs%seeker%x = int(recv_buf(k))
-        k = k+1; gs%seeker%y = int(recv_buf(k))
+        do i = 1, np
+            k = k+1; gs%players(i)%x = int(recv_buf(k))
+            k = k+1; gs%players(i)%y = int(recv_buf(k))
+        end do
 
-        ! Parse key position
-        k = k+1; gs%key_x = int(recv_buf(k))
-        k = k+1; gs%key_y = int(recv_buf(k))
-        gs%key_active = .true.
+        ! Parse key positions
+        gs%num_keys   = nk
+        gs%keys_found = 0
+        do i = 1, nk
+            k = k+1; gs%key_x(i) = int(recv_buf(k))
+            k = k+1; gs%key_y(i) = int(recv_buf(k))
+            gs%key_active(i) = .true.
+        end do
 
-        ! Set up player defaults
-        gs%hider%vision_radius  = vis_h
-        gs%hider%num_items      = 0
-        gs%hider%inventory      = ITEM_NONE
-        gs%hider%speed          = sp_h
-        gs%hider%actions_left   = sp_h
-        gs%seeker%vision_radius = vis_s
-        gs%seeker%num_items     = 0
-        gs%seeker%inventory     = ITEM_NONE
-        gs%seeker%speed         = sp_s
-        gs%seeker%actions_left  = sp_s
-
-        gs%h_visible       = .false.
-        gs%s_visible       = .false.
-        gs%h_visited       = .false.
-        gs%s_visited       = .false.
-        gs%h_item_seen     = .false.
-        gs%s_item_seen     = .false.
-        gs%h_last_opp_x    = 0
-        gs%h_last_opp_y    = 0
-        gs%s_last_opp_x    = 0
-        gs%s_last_opp_y    = 0
-        gs%h_opp_seen      = .false.
-        gs%s_opp_seen      = .false.
-        gs%h_illuminate    = .false.
-        gs%s_illuminate    = .false.
-        gs%h_reveal        = rev_h
-        gs%s_reveal        = rev_s
-        gs%turn            = 0
-        gs%turn_number     = 1
-        gs%game_over       = .false.
-        gs%seeker_won      = .false.
-        gs%input_state     = INPUT_MOVE
-        gs%selected_slot   = 0
-        gs%initialized     = .true.
+        ! Initialize state
+        gs%visible     = .false.
+        gs%visited     = .false.
+        gs%item_seen   = .false.
+        gs%last_seen_x = 0
+        gs%last_seen_y = 0
+        gs%has_seen    = .false.
+        gs%current_player = 1
+        gs%turn_number    = 1
+        gs%game_over      = .false.
+        gs%seekers_won    = .false.
+        gs%input_state    = INPUT_MOVE
+        gs%selected_slot  = 0
+        gs%initialized    = .true.
 
         call game_compute_visibility(gs)
-
-        ! Receiver's role: opposite of host
-        am_hider = .not. host_hides
-        needed = 0   ! success
+        needed = 0
     end subroutine
 
     ! ==================================================================
-    ! Restart: re-init game and send new init to a client fd.
+    ! Restart: re-init game and send new init to all players in room.
     ! ==================================================================
-    subroutine server_restart_game(fd, gs, cfg, status)
-        integer(c_int), intent(in) :: fd
+    subroutine server_restart_game(room, gs, cfg, player_teams, status)
+        type(room_type), intent(in) :: room
         type(game_state), intent(out) :: gs
         type(server_config), intent(inout) :: cfg
+        integer, intent(in) :: player_teams(MAX_PLAYERS)
         integer(c_int), intent(out) :: status
+        integer :: i
 
-        ! Send restart signal (action_type=9)
-        call server_send_action(fd, 9, 0)
+        ! Send restart signal (action_type=9) to all
+        do i = 1, room%num_players
+            call server_send_action(room%players(i)%fd, 0, 9, 0)
+        end do
 
         ! Generate new game
-        call server_init_game(gs, cfg)
+        call server_init_game(gs, cfg, room%num_players, player_teams)
 
-        ! Send init to client
-        call server_send_init_to_fd(fd, gs, cfg%host_hides, status)
+        ! Send init to each player
+        do i = 1, room%num_players
+            call server_send_init_to_fd(room%players(i)%fd, gs, i, status)
+        end do
     end subroutine
 
     ! ==================================================================
-    ! Send a 2-byte action message.
+    ! Send a 3-byte action message: [pidx, action_type, param].
     ! ==================================================================
-    subroutine server_send_action(fd, action_type, param)
+    subroutine server_send_action(fd, pidx, action_type, param)
         integer(c_int), intent(in) :: fd
-        integer, intent(in) :: action_type, param
+        integer, intent(in) :: pidx, action_type, param
 
-        integer(c_int8_t), target :: msg(2)
+        integer(c_int8_t), target :: msg(3)
         integer(c_int) :: st
 
-        msg(1) = int(action_type, c_int8_t)
-        msg(2) = int(param, c_int8_t)
-        call net_send_bytes(fd, msg, 2_c_int, st)
+        msg(1) = int(pidx, c_int8_t)
+        msg(2) = int(action_type, c_int8_t)
+        msg(3) = int(param, c_int8_t)
+        call net_send_bytes(fd, msg, 3_c_int, st)
     end subroutine
 
     ! ==================================================================
-    ! Try to receive a 2-byte action (non-blocking).
+    ! Try to receive a 3-byte action (non-blocking).
     ! Returns got=.true. if an action was received.
     ! ==================================================================
-    subroutine server_try_recv_action(fd, action_type, param, got)
+    subroutine server_try_recv_action(fd, pidx, action_type, param, got, peer_closed)
         integer(c_int), intent(in) :: fd
-        integer, intent(out) :: action_type, param
+        integer, intent(out) :: pidx, action_type, param
         logical, intent(out) :: got
+        logical, intent(out), optional :: peer_closed
 
-        integer(c_int8_t), target :: msg(2)
+        integer(c_int8_t), target :: msg(3)
         integer(c_int) :: nbytes
 
         got = .false.
-        call net_try_recv_bytes(fd, msg, 2_c_int, nbytes)
-        if (nbytes >= 2) then
-            action_type = int(msg(1))
-            param = int(msg(2))
+        if (present(peer_closed)) peer_closed = .false.
+        call net_try_recv_bytes(fd, msg, 3_c_int, nbytes)
+        if (nbytes == -1) then
+            if (present(peer_closed)) peer_closed = .true.
+            return
+        end if
+        if (nbytes >= 3) then
+            pidx = int(msg(1))
+            action_type = int(msg(2))
+            param = int(msg(3))
             got = .true.
         end if
     end subroutine
@@ -586,9 +606,10 @@ contains
         k=k+1; buf(k) = int(cfg%vision_s, c_int8_t)
         k=k+1; if (cfg%reveal_h) then; buf(k)=1; else; buf(k)=0; end if
         k=k+1; if (cfg%reveal_s) then; buf(k)=1; else; buf(k)=0; end if
-        k=k+1; if (cfg%host_hides) then; buf(k)=1; else; buf(k)=0; end if
+        k=k+1; buf(k) = int(cfg%num_keys, c_int8_t)
+        k=k+1; buf(k) = int(cfg%turn_timer, c_int8_t)
         k=k+1; buf(k) = int(cfg%branch_pct, c_int8_t)
-        nbytes = k  ! 16
+        nbytes = k  ! 17
     end subroutine
 
     ! ==================================================================
@@ -614,7 +635,8 @@ contains
         k=k+1; cfg%vision_s    = int(buf(k))
         k=k+1; cfg%reveal_h    = (buf(k) /= 0)
         k=k+1; cfg%reveal_s    = (buf(k) /= 0)
-        k=k+1; cfg%host_hides  = (buf(k) /= 0)
+        k=k+1; cfg%num_keys    = int(buf(k))
+        k=k+1; cfg%turn_timer  = int(buf(k))
         k=k+1; cfg%branch_pct  = int(buf(k))
     end subroutine
 
@@ -689,8 +711,8 @@ contains
 
     ! ==================================================================
     ! Build room update payload for MSG_ROOM_UPDATE
-    ! Format: [config:16][num_players:1] then for each player:
-    !   [name_len:1][name:N][is_host:1]
+    ! Format: [config:17][num_players:1] then for each player:
+    !   [name_len:1][name:N][is_host:1][team:1]
     ! ==================================================================
     subroutine room_build_update_payload(room, buf, nbytes)
         type(room_type), intent(in) :: room
@@ -713,6 +735,7 @@ contains
                 k = k + nlen
             end if
             k=k+1; if (room%players(i)%is_host) then; buf(k)=1; else; buf(k)=0; end if
+            k=k+1; buf(k) = int(room%players(i)%team, c_int8_t)
         end do
         nbytes = k
     end subroutine
@@ -721,12 +744,13 @@ contains
     ! Parse room update payload (client side)
     ! ==================================================================
     subroutine room_parse_update_payload(buf, buflen, cfg, &
-            player_names, player_is_host, num_players_out)
+            player_names, player_is_host, player_teams, num_players_out)
         integer(c_int8_t), intent(in) :: buf(:)
         integer, intent(in) :: buflen
         type(server_config), intent(out) :: cfg
         character(len=32), intent(out) :: player_names(:)
         logical, intent(out) :: player_is_host(:)
+        integer, intent(out) :: player_teams(:)
         integer, intent(out) :: num_players_out
 
         integer :: k, i, nlen, max_out
@@ -748,6 +772,7 @@ contains
                 k = k + nlen
             end if
             k=k+1; player_is_host(i) = (buf(k) /= 0)
+            k=k+1; player_teams(i) = int(buf(k))
         end do
     end subroutine
 
@@ -856,12 +881,16 @@ contains
         integer(c_int8_t) :: msg_type
         integer(c_int8_t) :: payload(1024)
         integer :: payload_len
-        logical :: got
+        logical :: got, closed
 
         call net_try_recv_msg(srv%clients(ci)%fd, srv%clients(ci)%recv_buf, &
                               EMB_RECV_BUF_SZ, srv%clients(ci)%recv_pos, &
-                              msg_type, payload, 1024, payload_len, got)
+                              msg_type, payload, 1024, payload_len, got, closed)
 
+        if (closed) then
+            call emb_disconnect_client(srv, ci)
+            return
+        end if
         if (.not. got) return
 
         select case (msg_type)
@@ -875,10 +904,13 @@ contains
                 call emb_handle_leave_room(srv, ci)
             case (MSG_CONFIG_CHANGE)
                 call emb_handle_config_change(srv, ci, payload, payload_len)
+            case (MSG_TEAM_CHANGE)
+                call emb_handle_team_change(srv, ci, payload, payload_len)
             case (MSG_START_GAME)
                 call emb_handle_start_game(srv, ci)
             case default
-                call emb_disconnect_client(srv, ci)
+                ! Discard stale data (e.g. game-protocol bytes after transition)
+                srv%clients(ci)%recv_pos = 0
         end select
     end subroutine
 
@@ -1007,14 +1039,40 @@ contains
     end subroutine
 
     ! ==================================================================
+    ! Embedded server: handle MSG_TEAM_CHANGE
+    ! Payload: [player_slot (1-byte), new_team (1-byte)]
+    ! ==================================================================
+    subroutine emb_handle_team_change(srv, ci, payload, plen)
+        type(emb_server_type), intent(inout) :: srv
+        integer, intent(in) :: ci, plen
+        integer(c_int8_t), intent(in) :: payload(:)
+        integer :: ridx, slot, new_team
+
+        if (plen < 2) return
+        ridx = srv%clients(ci)%room_idx
+        if (ridx < 1 .or. ridx > MAX_ROOMS) return
+        if (.not. srv%rooms(ridx)%active) return
+        if (.not. emb_is_room_host(srv, ridx, srv%clients(ci)%fd)) return
+
+        slot = int(payload(1))
+        new_team = int(payload(2))
+        if (slot < 1 .or. slot > srv%rooms(ridx)%num_players) return
+        if (new_team /= TEAM_ESCAPE .and. new_team /= TEAM_LABYRINTH) return
+
+        srv%rooms(ridx)%players(slot)%team = new_team
+        call emb_send_room_update(srv, ridx)
+    end subroutine
+
+    ! ==================================================================
     ! Embedded server: handle MSG_START_GAME
     ! ==================================================================
     subroutine emb_handle_start_game(srv, ci)
         type(emb_server_type), intent(inout) :: srv
         integer, intent(in) :: ci
-        integer :: ridx
+        integer :: ridx, j, k
         integer(c_int) :: st
         integer(c_int8_t), target :: dummy(1)
+        integer :: player_teams(MAX_PLAYERS)
 
         ridx = srv%clients(ci)%room_idx
         if (ridx < 1 .or. ridx > MAX_ROOMS) return
@@ -1024,36 +1082,36 @@ contains
 
         srv%rooms(ridx)%in_game = .true.
 
-        call server_init_game(srv%room_gs(ridx), srv%rooms(ridx)%cfg)
+        ! Build player_teams from room
+        do j = 1, srv%rooms(ridx)%num_players
+            player_teams(j) = srv%rooms(ridx)%players(j)%team
+        end do
+
+        call server_init_game(srv%room_gs(ridx), srv%rooms(ridx)%cfg, &
+                              srv%rooms(ridx)%num_players, player_teams)
 
         ! Send MSG_START_GAME to all players
-        block
-            integer :: j
-            do j = 1, srv%rooms(ridx)%num_players
-                call net_send_msg(srv%rooms(ridx)%players(j)%fd, MSG_START_GAME, dummy, 0, st)
-            end do
-        end block
+        do j = 1, srv%rooms(ridx)%num_players
+            call net_send_msg(srv%rooms(ridx)%players(j)%fd, MSG_START_GAME, dummy, 0, st)
+        end do
 
-        ! Send game init to both players
-        call server_send_init_to_fd(srv%rooms(ridx)%players(1)%fd, srv%room_gs(ridx), &
-                                    .not. srv%rooms(ridx)%cfg%host_hides, st)
-        call server_send_init_to_fd(srv%rooms(ridx)%players(2)%fd, srv%room_gs(ridx), &
-                                    srv%rooms(ridx)%cfg%host_hides, st)
+        ! Send game init to each player with their index
+        do j = 1, srv%rooms(ridx)%num_players
+            call server_send_init_to_fd(srv%rooms(ridx)%players(j)%fd, &
+                                        srv%room_gs(ridx), j, st)
+        end do
 
         ! Switch clients to game state
-        block
-            integer :: j, k
-            do j = 1, srv%rooms(ridx)%num_players
-                do k = 1, EMB_MAX_CLIENTS
-                    if (srv%clients(k)%active .and. &
-                        srv%clients(k)%fd == srv%rooms(ridx)%players(j)%fd) then
-                        srv%clients(k)%state = EMB_CLIENT_GAME
-                        srv%clients(k)%recv_pos = 0
-                        exit
-                    end if
-                end do
+        do j = 1, srv%rooms(ridx)%num_players
+            do k = 1, EMB_MAX_CLIENTS
+                if (srv%clients(k)%active .and. &
+                    srv%clients(k)%fd == srv%rooms(ridx)%players(j)%fd) then
+                    srv%clients(k)%state = EMB_CLIENT_GAME
+                    srv%clients(k)%recv_pos = 0
+                    exit
+                end if
             end do
-        end block
+        end do
     end subroutine
 
     ! ==================================================================
@@ -1062,55 +1120,63 @@ contains
     subroutine emb_process_game_client(srv, ci)
         type(emb_server_type), intent(inout) :: srv
         integer, intent(in) :: ci
-        integer :: atype, param, ridx, role
-        integer(c_int) :: opp_fd, st
-        logical :: got, moved
+        integer :: atype, param, ridx, pidx, recv_pidx, j
+        integer(c_int) :: st
+        logical :: got, moved, closed
+        integer :: player_teams(MAX_PLAYERS)
 
         ridx = srv%clients(ci)%room_idx
         if (ridx < 1 .or. .not. srv%rooms(ridx)%active) return
         if (.not. srv%rooms(ridx)%in_game) return
 
-        call server_try_recv_action(srv%clients(ci)%fd, atype, param, got)
+        call server_try_recv_action(srv%clients(ci)%fd, recv_pidx, atype, param, got, closed)
+        if (closed) then
+            call emb_disconnect_client(srv, ci)
+            return
+        end if
         if (.not. got) return
 
-        call emb_find_opponent(srv, ridx, srv%clients(ci)%fd, opp_fd, role)
-        if (opp_fd < 0) return
+        ! Find this client's player index
+        pidx = emb_find_player_index(srv, ridx, srv%clients(ci)%fd)
+        if (pidx < 1) return
 
-        ! Quit: notify opponent, end room game
+        ! Quit: notify all others, end room game
         if (atype == 8) then
-            call server_send_action(opp_fd, 8, 0)
+            call emb_broadcast_action(srv, ridx, srv%clients(ci)%fd, 0, 8, 0)
             call emb_end_room_game(srv, ridx)
             return
         end if
 
-        ! Replay (host only): reinit game, send action 9 + init to both
+        ! Replay (host only): reinit game, send action 9 + init to all
         if (atype == 9) then
             if (.not. emb_is_room_host(srv, ridx, srv%clients(ci)%fd)) return
-            call server_init_game(srv%room_gs(ridx), srv%rooms(ridx)%cfg)
-            call server_send_action(srv%rooms(ridx)%players(1)%fd, 9, 0)
-            call server_send_action(srv%rooms(ridx)%players(2)%fd, 9, 0)
-            call server_send_init_to_fd(srv%rooms(ridx)%players(1)%fd, &
-                                        srv%room_gs(ridx), &
-                                        .not. srv%rooms(ridx)%cfg%host_hides, st)
-            call server_send_init_to_fd(srv%rooms(ridx)%players(2)%fd, &
-                                        srv%room_gs(ridx), &
-                                        srv%rooms(ridx)%cfg%host_hides, st)
+            do j = 1, srv%rooms(ridx)%num_players
+                player_teams(j) = srv%rooms(ridx)%players(j)%team
+            end do
+            call server_init_game(srv%room_gs(ridx), srv%rooms(ridx)%cfg, &
+                                  srv%rooms(ridx)%num_players, player_teams)
+            do j = 1, srv%rooms(ridx)%num_players
+                call server_send_action(srv%rooms(ridx)%players(j)%fd, 0, 9, 0)
+                call server_send_init_to_fd(srv%rooms(ridx)%players(j)%fd, &
+                                            srv%room_gs(ridx), j, st)
+            end do
             return
         end if
 
-        ! Back to room (host only): send action 10 to both, end game, send room update
+        ! Back to room (host only): send action 10 to all, end game
         if (atype == 10) then
             if (.not. emb_is_room_host(srv, ridx, srv%clients(ci)%fd)) return
-            call server_send_action(srv%rooms(ridx)%players(1)%fd, 10, 0)
-            call server_send_action(srv%rooms(ridx)%players(2)%fd, 10, 0)
+            do j = 1, srv%rooms(ridx)%num_players
+                call server_send_action(srv%rooms(ridx)%players(j)%fd, 0, 10, 0)
+            end do
             call emb_end_room_game(srv, ridx)
             call emb_send_room_update(srv, ridx)
             return
         end if
 
-        ! Leave room from game (non-host): notify opponent, end game, remove from room
+        ! Leave room from game (non-host): notify all others, end game, remove
         if (atype == 11) then
-            call server_send_action(opp_fd, 8, 0)
+            call emb_broadcast_action(srv, ridx, srv%clients(ci)%fd, 0, 8, 0)
             call emb_end_room_game(srv, ridx)
             call room_leave(srv%rooms, ridx, srv%clients(ci)%fd)
             srv%clients(ci)%room_idx = 0
@@ -1122,15 +1188,15 @@ contains
         ! Don't process normal moves after game over
         if (srv%room_gs(ridx)%game_over) return
 
-        ! Normal action: relay and apply
-        call server_send_action(opp_fd, atype, param)
+        ! Normal action: broadcast to all others and apply
+        call emb_broadcast_action(srv, ridx, srv%clients(ci)%fd, pidx, atype, param)
 
         if (atype == 0) then
-            moved = game_do_move(srv%room_gs(ridx), role, param)
+            moved = game_do_move(srv%room_gs(ridx), pidx, param)
         else if (atype == 7) then
             call game_do_pass(srv%room_gs(ridx))
         else
-            call game_do_use_item(srv%room_gs(ridx), role, atype, param)
+            call game_do_use_item(srv%room_gs(ridx), pidx, atype, param)
         end if
 
         call game_end_turn(srv%room_gs(ridx))
@@ -1174,27 +1240,37 @@ contains
     end function
 
     ! ==================================================================
-    ! Embedded server: find opponent and role
+    ! Embedded server: find player index by fd
     ! ==================================================================
-    subroutine emb_find_opponent(srv, ridx, my_fd, opp_fd, my_role)
+    function emb_find_player_index(srv, ridx, fd) result(pidx)
         type(emb_server_type), intent(in) :: srv
         integer, intent(in) :: ridx
-        integer(c_int), intent(in) :: my_fd
-        integer(c_int), intent(out) :: opp_fd
-        integer, intent(out) :: my_role
+        integer(c_int), intent(in) :: fd
+        integer :: pidx, j
 
-        opp_fd = -1
-        my_role = ROLE_HIDER
+        pidx = 0
+        do j = 1, srv%rooms(ridx)%num_players
+            if (srv%rooms(ridx)%players(j)%fd == fd) then
+                pidx = j
+                return
+            end if
+        end do
+    end function
 
-        if (srv%rooms(ridx)%num_players < 2) return
+    ! ==================================================================
+    ! Embedded server: broadcast action to all room players except sender
+    ! ==================================================================
+    subroutine emb_broadcast_action(srv, ridx, sender_fd, pidx, atype, param)
+        type(emb_server_type), intent(in) :: srv
+        integer, intent(in) :: ridx, pidx, atype, param
+        integer(c_int), intent(in) :: sender_fd
+        integer :: j
 
-        if (srv%rooms(ridx)%players(1)%fd == my_fd) then
-            my_role = ROLE_HIDER
-            opp_fd = srv%rooms(ridx)%players(2)%fd
-        else
-            my_role = ROLE_SEEKER
-            opp_fd = srv%rooms(ridx)%players(1)%fd
-        end if
+        do j = 1, srv%rooms(ridx)%num_players
+            if (srv%rooms(ridx)%players(j)%fd /= sender_fd) then
+                call server_send_action(srv%rooms(ridx)%players(j)%fd, pidx, atype, param)
+            end if
+        end do
     end subroutine
 
     ! ==================================================================
@@ -1213,6 +1289,7 @@ contains
                     srv%clients(k)%fd == srv%rooms(ridx)%players(j)%fd) then
                     srv%clients(k)%state = EMB_CLIENT_ROOM
                     srv%clients(k)%recv_pos = 0
+                    call net_drain_socket(srv%clients(k)%fd)
                     exit
                 end if
             end do
@@ -1230,13 +1307,9 @@ contains
         ridx = srv%clients(ci)%room_idx
         if (ridx > 0 .and. srv%rooms(ridx)%active) then
             if (srv%rooms(ridx)%in_game .and. srv%clients(ci)%state == EMB_CLIENT_GAME) then
-                block
-                    integer(c_int) :: opp_fd
-                    integer :: role
-                    call emb_find_opponent(srv, ridx, srv%clients(ci)%fd, opp_fd, role)
-                    if (opp_fd >= 0) call server_send_action(opp_fd, 8, 0)
-                    call emb_end_room_game(srv, ridx)
-                end block
+                ! Notify all other players this client quit
+                call emb_broadcast_action(srv, ridx, srv%clients(ci)%fd, 0, 8, 0)
+                call emb_end_room_game(srv, ridx)
             end if
             call room_leave(srv%rooms, ridx, srv%clients(ci)%fd)
             if (srv%rooms(ridx)%active) call emb_send_room_update(srv, ridx)
