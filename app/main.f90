@@ -154,14 +154,18 @@ program forplay
         end subroutine
         subroutine c_sdl_stop_text_input() bind(C, name="SDL_StopTextInput")
         end subroutine
+#ifdef _WIN32
         function c_free_console() bind(C, name="FreeConsole") result(res)
             import :: c_int
             integer(c_int) :: res
         end function
+#endif
     end interface
 
+#ifdef _WIN32
     ! Hide the console window on Windows
     rc = c_free_console()
+#endif
 
     ! ---- Initialize colours ----
     COL_WHITE  = sdl_color(uint8(255), uint8(255), uint8(255), uint8(SDL_ALPHA_OPAQUE))
